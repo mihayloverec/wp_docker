@@ -1,0 +1,28 @@
+# =====================================================================
+#  Caddy edge config. Automatic HTTPS for every domain listed below.
+#  Caddy's reverse_proxy automatically sets X-Forwarded-Proto / -For /
+#  Host, which the WordPress wp-config already trusts for HTTPS.
+#
+#  ADD ONE BLOCK PER SITE.
+#  The upstream name is the site's container: <STACK_NAME>_wordpress:80
+# =====================================================================
+
+{
+	# Let's Encrypt account email (set ACME_EMAIL in proxy-caddy/.env)
+	email {$ACME_EMAIL}
+
+	# Uncomment while testing to avoid Let's Encrypt rate limits:
+	# acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+}
+
+# ---- Site 1 ---------------------------------------------------------
+superalex.pro, www.superalex.pro {
+	encode zstd gzip
+	reverse_proxy superalex_wordpress:80
+}
+
+# ---- Site 2 (copy this block per additional site) -------------------
+# anothersite.com, www.anothersite.com {
+# 	encode zstd gzip
+# 	reverse_proxy anothersite_wordpress:80
+# }

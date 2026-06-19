@@ -1,0 +1,16 @@
+# --- Secrets: never commit real .env files (any folder) ---
+.env
+**/.env
+.env.*
+# ...but DO keep the templates
+!.env.example
+!**/.env.example
+
+# Logs
+*.log
+
+# Local verification artifacts
+.verify/
+
+# Local Claude Code tooling config
+.claude/

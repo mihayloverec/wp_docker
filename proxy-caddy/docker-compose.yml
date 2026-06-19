@@ -1,0 +1,45 @@
+name: edge-proxy
+
+# =====================================================================
+#  Caddy edge reverse-proxy — the FALLBACK for when Nginx Proxy Manager
+#  is NOT installed. Deploy ONLY ONE edge proxy per server (NPM *or*
+#  Caddy) — both bind host ports 80/443.
+#
+#  Caddy is a web server + reverse proxy with AUTOMATIC HTTPS
+#  (Let's Encrypt), so no separate nginx layer is needed.
+#
+#  It routes each domain to the matching site container over the shared
+#  external "proxy" network. Add one block per site in ./Caddyfile.
+# =====================================================================
+
+services:
+  caddy:
+    image: caddy:2.8-alpine
+    container_name: edge_caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"   # HTTP/3 (QUIC)
+    environment:
+      ACME_EMAIL: ${ACME_EMAIL}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data      # persists certificates — DO NOT lose this
+      - caddy_config:/config
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    networks:
+      - proxy
+
+volumes:
+  caddy_data:
+  caddy_config:
+
+networks:
+  proxy:
+    external: true
+    name: ${PROXY_NETWORK}
