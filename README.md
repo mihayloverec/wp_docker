@@ -207,6 +207,12 @@ minimum, limits the hard ceiling. Tune to your server's RAM and chosen
 [profile](#resource-profiles).
 
 ### Backups (S3)
+The `backup` service is **opt-in**: it only starts when the `backup` Compose
+profile is active, so a stack without S3 configured never logs failed runs.
+Enable it once the variables below are filled in — set `COMPOSE_PROFILES=backup`
+in `.env` (then plain `docker compose up -d`), or pass `--profile backup` on the
+command line. Leave the profile off and the service is simply never created.
+
 | Variable | Default | Notes |
 |----------|---------|-------|
 | `BACKUP_HOUR` | `3` | Hour (0–23) of the daily run, in `TZ`. |
@@ -233,6 +239,15 @@ site's folder to match your chosen profile.
 | [`apache/migration.conf`](apache/migration.conf) | Apache timeouts / upload body limits | `Timeout 900`, `LimitRequestBody 0`, keep-alive |
 | [`Dockerfile`](Dockerfile) | Extra PHP extensions + wp-cli | phpredis, soap, wp-cli |
 
+`php/php.ini` ships as the **Heavy** profile. For smaller sites, copy a ready-made
+lighter profile over it instead of hand-editing:
+
+```bash
+cp php/php.ini.light.example  php/php.ini   # small blog / brochure
+cp php/php.ini.medium.example php/php.ini   # mid-size WooCommerce
+docker compose up -d wordpress              # apply
+```
+
 **Sizing rule of thumb:** set `innodb_buffer_pool_size` to ~50–70% of the RAM you
 give the DB container (`DB_MEM_LIMIT`). On bigger servers raise both together.
 
@@ -257,14 +272,16 @@ lighter ones so total RAM fits. Pick a profile per site.
 | `WPCRON_MEM_LIMIT` | `128m` | `256m` | `256m` |
 | **≈ RAM per site** | **~0.8–1 GB** | **~1.5–2 GB** | **~3–4 GB** |
 
-**Part B — file edits** (`php/php.ini`):
+**Part B — file edits** (`php/php.ini`) — the Light/Medium columns match the
+bundled `php/php.ini.light.example` / `php/php.ini.medium.example`, so you can just
+copy one over `php/php.ini` instead of editing by hand:
 
 | Setting | Light | Medium | Heavy |
 |---------|:---:|:---:|:---:|
 | `memory_limit` | `256M` | `512M` | `1024M` |
 | `opcache.memory_consumption` | `128` | `256` | `512` |
-| `opcache.max_accelerated_files` | `10000` | `20000` | `50000` |
-| `opcache.jit_buffer_size` | `64M` | `128M` | `128M` |
+| `opcache.max_accelerated_files` | `20000` | `30000` | `50000` |
+| `opcache.jit_buffer_size` | `off` | `64M` | `128M` |
 
 **Part B — file edits** (`mariadb/my.cnf`):
 
@@ -321,7 +338,11 @@ default). To reach a site directly by `SERVER_IP:port` before DNS is ready, set
 <a name="backups"></a>
 ## Backups
 
-The `backup` service runs **daily** at `BACKUP_HOUR` (server timezone):
+The `backup` service is **opt-in** via the `backup` Compose profile (see
+[Backups (S3)](#backups-s3) above). With the profile off it never
+starts; enable it with `COMPOSE_PROFILES=backup` in `.env` or `--profile backup`.
+
+Once enabled it runs **daily** at `BACKUP_HOUR` (server timezone):
 
 1. `mariadb-dump` the database → gzip
 2. upload to `s3://<S3_BUCKET>/<S3_PATH>/db/`
@@ -332,8 +353,8 @@ It uses **rclone**, so any S3-compatible provider works. The bucket **must alrea
 exist** (the service uploads with `--s3-no-check-bucket`; it never creates buckets).
 
 ```bash
-# Run a backup right now
-docker compose exec backup /usr/local/bin/backup.sh
+# Run a backup right now (requires the backup profile to be enabled)
+docker compose --profile backup exec backup /usr/local/bin/backup.sh
 
 # List what's stored
 docker compose exec backup rclone lsl "s3:${S3_BUCKET}/${S3_PATH}/db/"
@@ -641,6 +662,12 @@ docker compose logs -f wordpress
 [профиль](#профили-ресурсов).
 
 ### Бэкапы (S3)
+Сервис `backup` — **opt-in**: он стартует только при активном Compose-профиле
+`backup`, поэтому стек без настроенного S3 не засоряет логи упавшими запусками.
+Включите его, когда переменные ниже заполнены — задайте `COMPOSE_PROFILES=backup`
+в `.env` (тогда обычный `docker compose up -d`), либо передайте `--profile backup`
+в командной строке. Если профиль выключен, сервис просто не создаётся.
+
 | Переменная | По умолч. | Примечание |
 |------------|-----------|-----------|
 | `BACKUP_HOUR` | `3` | Час (0–23) ежедневного запуска, в `TZ`. |
@@ -667,6 +694,15 @@ docker compose logs -f wordpress
 | [`apache/migration.conf`](apache/migration.conf) | Таймауты Apache / лимиты тела запроса | `Timeout 900`, `LimitRequestBody 0`, keep-alive |
 | [`Dockerfile`](Dockerfile) | Доп. расширения PHP + wp-cli | phpredis, soap, wp-cli |
 
+`php/php.ini` поставляется как профиль **Heavy**. Для небольших сайтов скопируйте
+готовый облегчённый профиль поверх него вместо ручной правки:
+
+```bash
+cp php/php.ini.light.example  php/php.ini   # маленький блог / визитка
+cp php/php.ini.medium.example php/php.ini   # средний WooCommerce
+docker compose up -d wordpress              # применить
+```
+
 **Правило размера:** ставьте `innodb_buffer_pool_size` ~50–70% от RAM, выделенной
 контейнеру БД (`DB_MEM_LIMIT`). На больших серверах поднимайте оба вместе.
 
@@ -691,14 +727,16 @@ docker compose logs -f wordpress
 | `WPCRON_MEM_LIMIT` | `128m` | `256m` | `256m` |
 | **≈ RAM на сайт** | **~0.8–1 ГБ** | **~1.5–2 ГБ** | **~3–4 ГБ** |
 
-**Часть B — правки файлов** (`php/php.ini`):
+**Часть B — правки файлов** (`php/php.ini`) — колонки Light/Medium совпадают с
+готовыми `php/php.ini.light.example` / `php/php.ini.medium.example`, так что можно
+просто скопировать нужный поверх `php/php.ini`, а не править вручную:
 
 | Параметр | Light | Medium | Heavy |
 |----------|:---:|:---:|:---:|
 | `memory_limit` | `256M` | `512M` | `1024M` |
 | `opcache.memory_consumption` | `128` | `256` | `512` |
-| `opcache.max_accelerated_files` | `10000` | `20000` | `50000` |
-| `opcache.jit_buffer_size` | `64M` | `128M` | `128M` |
+| `opcache.max_accelerated_files` | `20000` | `30000` | `50000` |
+| `opcache.jit_buffer_size` | `off` | `64M` | `128M` |
 
 **Часть B — правки файлов** (`mariadb/my.cnf`):
 
