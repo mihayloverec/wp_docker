@@ -1,0 +1,50 @@
+; =====================================================================
+;  MEDIUM PHP profile — mid-size WooCommerce / Elementor site on a
+;  server with moderate RAM (e.g. 4 GB). A balance between the light
+;  and heavy profiles. Copy over php/php.ini to use it:
+;    cp php/php.ini.medium.example php/php.ini && docker compose up -d wordpress
+; =====================================================================
+
+; --- Uploads / memory / execution -----------------------------------
+file_uploads           = On
+memory_limit           = 512M
+upload_max_filesize    = 1024M
+post_max_size          = 1024M
+max_execution_time     = 600
+max_input_time         = 600
+max_input_vars         = 5000
+max_file_uploads       = 30
+default_socket_timeout = 120
+
+; --- Errors (no output in prod, log to container stderr) ------------
+display_errors         = Off
+display_startup_errors = Off
+log_errors             = On
+error_reporting        = E_ALL & ~E_DEPRECATED & ~E_STRICT
+error_log              = /dev/stderr
+
+; --- Security -------------------------------------------------------
+expose_php             = Off
+allow_url_fopen        = On
+allow_url_include      = Off
+cgi.fix_pathinfo       = 0
+
+; --- Realpath cache -------------------------------------------------
+realpath_cache_size    = 4096k
+realpath_cache_ttl     = 600
+
+; --- OPcache --------------------------------------------------------
+opcache.enable                  = 1
+opcache.enable_cli              = 0
+opcache.memory_consumption      = 256
+opcache.interned_strings_buffer = 24
+opcache.max_accelerated_files   = 30000
+opcache.validate_timestamps     = 1
+opcache.revalidate_freq         = 2
+opcache.save_comments           = 1
+opcache.fast_shutdown           = 1
+opcache.enable_file_override    = 0
+
+; --- OPcache JIT (PHP 8.x) ------------------------------------------
+opcache.jit                     = tracing
+opcache.jit_buffer_size         = 64M

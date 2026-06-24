@@ -1,0 +1,51 @@
+; =====================================================================
+;  LIGHT PHP profile — small blog / brochure / low-traffic site on a
+;  modest server (e.g. 1-2 GB RAM). Copy over php/php.ini to use it:
+;    cp php/php.ini.light.example php/php.ini && docker compose up -d wordpress
+;  Keep WP_MEMORY_LIMIT in .env and DB_MEM_LIMIT in line with these.
+; =====================================================================
+
+; --- Uploads / memory / execution -----------------------------------
+file_uploads           = On
+memory_limit           = 256M
+upload_max_filesize    = 256M
+post_max_size          = 256M
+max_execution_time     = 300
+max_input_time         = 300
+max_input_vars         = 3000
+max_file_uploads       = 20
+default_socket_timeout = 60
+
+; --- Errors (no output in prod, log to container stderr) ------------
+display_errors         = Off
+display_startup_errors = Off
+log_errors             = On
+error_reporting        = E_ALL & ~E_DEPRECATED & ~E_STRICT
+error_log              = /dev/stderr
+
+; --- Security -------------------------------------------------------
+expose_php             = Off
+allow_url_fopen        = On
+allow_url_include      = Off
+cgi.fix_pathinfo       = 0
+
+; --- Realpath cache -------------------------------------------------
+realpath_cache_size    = 2048k
+realpath_cache_ttl     = 600
+
+; --- OPcache --------------------------------------------------------
+opcache.enable                  = 1
+opcache.enable_cli              = 0
+opcache.memory_consumption      = 128
+opcache.interned_strings_buffer = 16
+opcache.max_accelerated_files   = 20000
+opcache.validate_timestamps     = 1
+opcache.revalidate_freq         = 2
+opcache.save_comments           = 1
+opcache.fast_shutdown           = 1
+opcache.enable_file_override    = 0
+
+; --- OPcache JIT (PHP 8.x) ------------------------------------------
+;  Off on tiny sites — the JIT buffer is rarely worth the RAM here.
+opcache.jit                     = off
+opcache.jit_buffer_size         = 0
