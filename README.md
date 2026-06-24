@@ -173,7 +173,7 @@ only the `*.env.example` templates.
 ### Stack identity & domain
 | Variable | Example | Notes |
 |----------|---------|-------|
-| `STACK_NAME` | `superalex` | Compose project name + prefix for all containers/volumes. **Unique per site.** |
+| `STACK_NAME` | `mysite` | Compose project name + prefix for all containers/volumes. **Unique per site.** |
 | `DOMAIN` | `example.com` | The site's domain. |
 | `WP_HOME` / `WP_SITEURL` | `https://example.com` | Hard-coded into `wp-config`; forces the correct URL even if an imported DB has the old one. |
 | `PROXY_NETWORK` | `web-proxy` | External Docker network shared with the edge proxy. **Same value in every stack.** |
@@ -627,7 +627,7 @@ docker compose logs -f wordpress
 ### Идентификатор стека и домен
 | Переменная | Пример | Примечание |
 |------------|--------|-----------|
-| `STACK_NAME` | `superalex` | Имя проекта Compose + префикс контейнеров/томов. **Уникален для сайта.** |
+| `STACK_NAME` | `mysite` | Имя проекта Compose + префикс контейнеров/томов. **Уникален для сайта.** |
 | `DOMAIN` | `example.com` | Домен сайта. |
 | `WP_HOME` / `WP_SITEURL` | `https://example.com` | Прошиты в `wp-config`; форсируют верный URL даже если в импортированной БД старый. |
 | `PROXY_NETWORK` | `web-proxy` | Внешняя сеть Docker, общая с edge-прокси. **Одинакова во всех стеках.** |

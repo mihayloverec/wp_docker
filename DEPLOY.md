@@ -180,7 +180,7 @@ This stack **builds a custom image** (`Dockerfile`), so Portainer needs the
 whole folder, not just the compose file. Use the **Git repository** method:
 
 1. Go to **Stacks** -> **Add stack** -> **Repository**
-2. Name: `superalex`
+2. Name: `mysite`
 3. Point it at the repo/branch holding these files (compose + `Dockerfile`
    + `php/`, `mariadb/`, `apache/`). The build needs that context.
 4. Add the `.env` variables (Portainer env section, or commit a `.env`).
@@ -194,9 +194,9 @@ whole folder, not just the compose file. Use the **Git repository** method:
 ## 4) Configure Nginx Proxy Manager
 
 Create Proxy Host:
-- Domain: `superalex.pro` (+ `www.superalex.pro` if needed)
+- Domain: `example.com` (+ `www.example.com` if needed)
 - Scheme: `http`
-- Forward Hostname / IP: `superalex_wordpress`
+- Forward Hostname / IP: `mysite_wordpress`
 - Forward Port: `80`
 - Enable Websockets
 - Request SSL certificate (Let's Encrypt), use email from `LETSENCRYPT_EMAIL`, enable Force SSL
@@ -204,8 +204,8 @@ Create Proxy Host:
 ## 5) DNS
 
 Point A record(s) to your server public IP:
-- `superalex.pro`
-- `www.superalex.pro` (optional)
+- `example.com`
+- `www.example.com` (optional)
 
 ## 6) First start checks
 

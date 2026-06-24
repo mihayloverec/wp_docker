@@ -39,14 +39,14 @@ volume instead:
 **Duplicator Pro** (Import expects packages in `wp-snapshots`):
 
 ```bash
-docker cp ./mysite_package.daf  superalex_wordpress:/var/www/html/wp-content/backups-dup-pro/
-docker cp ./mysite_package.zip  superalex_wordpress:/var/www/html/wp-content/backups-dup-pro/
+docker cp ./mysite_package.daf  mysite_wordpress:/var/www/html/wp-content/backups-dup-pro/
+docker cp ./mysite_package.zip  mysite_wordpress:/var/www/html/wp-content/backups-dup-pro/
 ```
 
 **WPvivid** (expects backups in `wpvividbackups`):
 
 ```bash
-docker cp ./wpvivid-backup_xxx.zip superalex_wordpress:/var/www/html/wp-content/wpvividbackups/
+docker cp ./wpvivid-backup_xxx.zip mysite_wordpress:/var/www/html/wp-content/wpvividbackups/
 ```
 
 Then fix ownership so the plugin can read/move the files:
@@ -132,7 +132,7 @@ docker compose exec wordpress wp db export - --allow-root > dump.sql   # source
 docker compose exec -T wordpress wp db import - --allow-root < dump.sql # target
 
 # wp-content (themes/plugins/uploads)
-docker cp ./wp-content/. superalex_wordpress:/var/www/html/wp-content/
+docker cp ./wp-content/. mysite_wordpress:/var/www/html/wp-content/
 docker compose exec wordpress chown -R www-data:www-data /var/www/html/wp-content
 ```
 
