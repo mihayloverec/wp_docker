@@ -216,7 +216,13 @@ services:
 
   # Daily DB (+ optional wp-content) backup to S3-compatible storage
   # (Timeweb Cloud, Selectel, AWS S3, ...). Schedule + retention via .env.
+  #
+  # Opt-in: this service only starts when the "backup" profile is enabled,
+  # so a stack without S3 configured won't spam its logs with failed runs.
+  # Enable it with:   docker compose --profile backup up -d
+  # (or add COMPOSE_PROFILES=backup to .env to turn it on permanently).
   backup:
+    profiles: [ "backup" ]
     build:
       context: ./backup
       dockerfile: Dockerfile
