@@ -100,7 +100,11 @@ services:
         define('WP_HOME', '${WP_HOME}');
         define('WP_SITEURL', '${WP_SITEURL}');
 
-        /* Trust the reverse proxy (Nginx Proxy Manager) for HTTPS */
+        /* Trust the reverse proxy for HTTPS + real client IP.
+           NOTE: X-Forwarded-* is trusted unconditionally, which is correct
+           ONLY behind the edge proxy. Keep WP_HTTP_BIND=127.0.0.1 — if this
+           container is exposed directly (0.0.0.0), clients could spoof these
+           headers to fake their IP / HTTPS state. */
         if (isset($$_SERVER['HTTP_X_FORWARDED_PROTO']) && $$_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https') {
             $$_SERVER['HTTPS'] = 'on';
         }
