@@ -248,9 +248,14 @@ services:
       RETENTION_DAYS: ${RETENTION_DAYS:-14}
       BACKUP_FILES: ${BACKUP_FILES:-true}
       BACKUP_ON_START: ${BACKUP_ON_START:-false}
-      # Where in the bucket to store this site's backups
+      # Where in the bucket to store this site's backups.
+      # No nested ${...} here — Compose interpolation doesn't reliably
+      # support it across versions. We pass STACK_NAME through and let
+      # backup.sh apply the "empty S3_PATH -> STACK_NAME" fallback (that
+      # runs in a POSIX shell, where nested expansion is valid).
+      STACK_NAME: ${STACK_NAME:-wordpress}
       S3_BUCKET: ${S3_BUCKET}
-      S3_PATH: ${S3_PATH:-${STACK_NAME:-wordpress}}
+      S3_PATH: ${S3_PATH:-}
       # rclone S3 remote (works with any S3-compatible provider)
       RCLONE_CONFIG_S3_TYPE: s3
       RCLONE_CONFIG_S3_PROVIDER: ${S3_PROVIDER:-Other}

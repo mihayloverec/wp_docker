@@ -3,8 +3,10 @@
 #  Caddy's reverse_proxy automatically sets X-Forwarded-Proto / -For /
 #  Host, which the WordPress wp-config already trusts for HTTPS.
 #
-#  THIS IS A TEMPLATE — replace the example domain and upstream below
-#  with your real values before deploying. ADD ONE BLOCK PER SITE.
+#  THIS IS A TEMPLATE. All site blocks below are COMMENTED OUT on purpose
+#  so a fresh Caddy start doesn't try to issue a cert for example.com or
+#  proxy to a non-existent container. Uncomment one block per site and
+#  edit it. ADD ONE BLOCK PER SITE.
 #  The upstream name is the site's container: <STACK_NAME>_wordpress:80
 #  (STACK_NAME is set in each site's .env; default "wordpress").
 # =====================================================================
@@ -17,13 +19,13 @@
 	# acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
 }
 
-# ---- Site 1 (EDIT ME) -----------------------------------------------
+# ---- Site 1 — uncomment and edit for your first site ----------------
 # Replace example.com with your domain and <STACK_NAME> with the site's
 # STACK_NAME from its .env (the upstream is <STACK_NAME>_wordpress:80).
-example.com, www.example.com {
-	encode zstd gzip
-	reverse_proxy wordpress_wordpress:80
-}
+# example.com, www.example.com {
+# 	encode zstd gzip
+# 	reverse_proxy wordpress_wordpress:80
+# }
 
 # ---- Site 2 (copy this block per additional site) -------------------
 # anothersite.com, www.anothersite.com {

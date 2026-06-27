@@ -8,7 +8,8 @@ set -eu
 
 DB_HOST="${DB_HOST:-db}"
 RETENTION_DAYS="${RETENTION_DAYS:-14}"
-S3_PATH="${S3_PATH:-backups}"
+# Empty S3_PATH falls back to STACK_NAME (matches docs), then to "wordpress".
+S3_PATH="${S3_PATH:-${STACK_NAME:-wordpress}}"
 DEST="s3:${S3_BUCKET}/${S3_PATH}"
 TS="$(date +%Y%m%d-%H%M%S)"
 
