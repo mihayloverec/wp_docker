@@ -15,6 +15,9 @@ if [ "${BACKUP_ON_START:-false}" = "true" ]; then
     /usr/local/bin/backup.sh || echo "[backup] initial run failed"
 fi
 
+# NOTE: the scheduling below relies on GNU `date -d` (coreutils), which is
+# present in the Debian-based mariadb:11.4 image this runs in. It would NOT
+# work on Alpine/BusyBox or macOS date — keep this service on a glibc base.
 while true; do
     now="$(date +%s)"
     target="$(date -d "$(date +%Y-%m-%d) ${BACKUP_HOUR}:00:00" +%s)"
