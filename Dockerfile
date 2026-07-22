@@ -14,7 +14,7 @@ RUN set -eux; \
     # msmtp + ca-certificates are RUNTIME deps (plugin-free SMTP mail);
     # they are intentionally NOT in the purge list below.
     apt-get install -y --no-install-recommends \
-        $PHPIZE_DEPS libxml2-dev less msmtp ca-certificates; \
+        $PHPIZE_DEPS libxml2-dev msmtp ca-certificates; \
     # phpredis for Redis Object Cache (PhpRedis client = fast path).
     # Built from the GitHub tarball — more reliable than the pecl channel.
     mkdir -p /usr/src/php/ext/redis; \
