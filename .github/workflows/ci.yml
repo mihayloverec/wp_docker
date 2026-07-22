@@ -40,12 +40,12 @@ jobs:
           severity: warning
 
       - name: hadolint (wordpress image)
-        uses: hadolint/hadolint-action@v3.1.0
+        uses: hadolint/hadolint-action@v3.3.0
         with:
           dockerfile: Dockerfile
 
       - name: hadolint (backup image)
-        uses: hadolint/hadolint-action@v3.1.0
+        uses: hadolint/hadolint-action@v3.3.0
         with:
           dockerfile: backup/Dockerfile
 
