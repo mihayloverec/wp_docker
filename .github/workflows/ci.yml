@@ -28,6 +28,10 @@ jobs:
                 min-spaces-from-content: 1
               truthy:
                 check-keys: false
+              # Compose uses spaced flow sequences, e.g. [ "CMD", "..." ] and
+              # [ "/bin/sh", "-c" ] — allow one space just inside the brackets.
+              brackets:
+                max-spaces-inside: 1
 
       - name: shellcheck (backup + verify scripts)
         uses: ludeeus/action-shellcheck@master

@@ -1,0 +1,17 @@
+# hadolint configuration — used by CI (.github/workflows/ci.yml) and locally.
+#
+# The rules below are intentionally disabled for this template; each has a
+# concrete reason, not a blanket "shut the linter up":
+ignored:
+  # DL3008 — "pin apt versions". Intentionally unpinned: this is a maintained
+  # template that should pick up Debian security updates on rebuild, and pinned
+  # versions break the build once Debian drops the old package from the mirror.
+  - DL3008
+  # DL4006 — "set -o pipefail before a piped RUN". The base images use /bin/sh
+  # (dash), which has no pipefail. The pipes here are self-guarding: `curl -f`
+  # fails on HTTP errors and an empty stream then fails `tar`, and downloads are
+  # checksum-verified (sha512sum) right after.
+  - DL4006
+  # SC2086 — "double quote to prevent word splitting". $PHPIZE_DEPS is a
+  # space-separated LIST of package names that MUST word-split for apt-get.
+  - SC2086
