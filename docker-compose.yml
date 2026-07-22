@@ -21,6 +21,8 @@ services:
     image: mariadb:11.4
     container_name: ${STACK_NAME:-wordpress}_db
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     logging: *default-logging
     environment:
       MARIADB_DATABASE: ${MYSQL_DATABASE}
@@ -51,6 +53,8 @@ services:
     image: redis:7.4-alpine
     container_name: ${STACK_NAME:-wordpress}_redis
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     logging: *default-logging
     command:
       - redis-server
@@ -86,6 +90,8 @@ services:
     image: ${STACK_NAME:-wordpress}-wp:local
     container_name: ${STACK_NAME:-wordpress}_wordpress
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     logging: *default-logging
     depends_on:
       db:
@@ -95,21 +101,22 @@ services:
     environment:
       <<: *wp-db-env
       WORDPRESS_DEBUG: ${WORDPRESS_DEBUG}
+      # Trusted proxy CIDRs for Apache mod_remoteip (apache/migration.conf).
+      # Default trusts private ranges; narrow to your edge proxy's subnet.
+      TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-10.0.0.0/8 172.16.0.0/12 192.168.0.0/16}
       WORDPRESS_CONFIG_EXTRA: |
         /* URLs */
         define('WP_HOME', '${WP_HOME}');
         define('WP_SITEURL', '${WP_SITEURL}');
 
-        /* Trust the reverse proxy for HTTPS + real client IP.
-           NOTE: X-Forwarded-* is trusted unconditionally, which is correct
-           ONLY behind the edge proxy. Keep WP_HTTP_BIND=127.0.0.1 — if this
-           container is exposed directly (0.0.0.0), clients could spoof these
-           headers to fake their IP / HTTPS state. */
+        /* Real client IP is handled by Apache mod_remoteip (see
+           apache/migration.conf + TRUSTED_PROXY_CIDRS): it trusts
+           X-Forwarded-For ONLY from your edge proxy, which is safer than
+           trusting it in PHP unconditionally. Here we only map
+           X-Forwarded-Proto to HTTPS so WordPress builds https:// URLs
+           behind the TLS-terminating proxy. */
         if (isset($$_SERVER['HTTP_X_FORWARDED_PROTO']) && $$_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https') {
             $$_SERVER['HTTPS'] = 'on';
-        }
-        if (isset($$_SERVER['HTTP_X_FORWARDED_FOR'])) {
-            $$_SERVER['REMOTE_ADDR'] = trim(explode(',', $$_SERVER['HTTP_X_FORWARDED_FOR'])[0]);
         }
 
         /* Filesystem & updates */
@@ -190,6 +197,8 @@ services:
     image: ${STACK_NAME:-wordpress}-wp:local
     container_name: ${STACK_NAME:-wordpress}_wpcron
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     logging: *default-logging
     user: www-data
     depends_on:
@@ -207,10 +216,27 @@ services:
         echo "[wp-cron] starting cron loop"
         while true; do
           if wp core is-installed --quiet 2>/dev/null; then
-            wp cron event run --due-now --quiet 2>/dev/null || true
+            # Don't hide failures: capture output + exit code, log on error,
+            # and stamp a success file so the healthcheck can see cron is alive.
+            if out="$(wp cron event run --due-now 2>&1)"; then
+              date +%s > /tmp/wp-cron-last-success
+            else
+              rc=$?
+              echo "[wp-cron] cron run FAILED (exit $rc): $out"
+            fi
+          else
+            echo "[wp-cron] WordPress not installed yet; waiting"
           fi
           sleep 60
         done
+    healthcheck:
+      # Unhealthy if the cron loop hasn't completed a run in the last 5 min
+      # (it runs every 60s and stamps the file even when no events are due).
+      test: [ "CMD-SHELL", "test -f /tmp/wp-cron-last-success && [ $(( $(date +%s) - $(cat /tmp/wp-cron-last-success) )) -lt 300 ]" ]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 180s
     deploy:
       resources:
         limits:
@@ -264,8 +290,25 @@ services:
       RCLONE_CONFIG_S3_ENDPOINT: ${S3_ENDPOINT}
       RCLONE_CONFIG_S3_REGION: ${S3_REGION:-}
       RCLONE_CONFIG_S3_ACL: private
+      # Observability: optional dead-man's-switch ping (Healthchecks.io etc.)
+      # — backup.sh pings it on success, entrypoint.sh pings <URL>/fail on
+      # failure. Leave empty to disable. BACKUP_MAX_AGE_HOURS drives the
+      # container healthcheck below (unhealthy if no success within it).
+      HEALTHCHECK_URL: ${HEALTHCHECK_URL:-}
+      BACKUP_MAX_AGE_HOURS: ${BACKUP_MAX_AGE_HOURS:-26}
     volumes:
       - wp_data:/var/www/html:ro   # read-only, only for the files backup
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      # Unhealthy if no successful backup within BACKUP_MAX_AGE_HOURS.
+      # start_period is long so a fresh container (whose first scheduled run
+      # may be up to ~24h away) doesn't flap before its first success.
+      test: [ "CMD", "/usr/local/bin/healthcheck.sh" ]
+      interval: 1h
+      timeout: 10s
+      retries: 2
+      start_period: 25h
     networks:
       - internal
 

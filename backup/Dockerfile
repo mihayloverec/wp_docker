@@ -5,13 +5,16 @@
 # =====================================================================
 FROM mariadb:11.4
 
+# curl is needed for the optional Healthchecks.io success/fail pings.
 RUN set -eux; \
     apt-get update; \
-    apt-get install -y --no-install-recommends rclone ca-certificates tzdata; \
-    rm -rf /var/lib/apt/lists/*
+    apt-get install -y --no-install-recommends rclone ca-certificates tzdata curl; \
+    rm -rf /var/lib/apt/lists/*; \
+    mkdir -p /var/lib/backup
 
 COPY backup.sh /usr/local/bin/backup.sh
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/backup.sh /usr/local/bin/entrypoint.sh
+COPY healthcheck.sh /usr/local/bin/healthcheck.sh
+RUN chmod +x /usr/local/bin/backup.sh /usr/local/bin/entrypoint.sh /usr/local/bin/healthcheck.sh
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

@@ -46,4 +46,14 @@ if [ "${BACKUP_FILES:-false}" = "true" ]; then
     rclone delete --min-age "${RETENTION_DAYS}d" "${DEST}/files/" --s3-no-check-bucket || true
 fi
 
+# --- 4) Record success (for the healthcheck) + ping the monitor -----
+# If we reached here, set -e means every step above succeeded.
+mkdir -p /var/lib/backup
+date +%s > /var/lib/backup/last-success
+if [ -n "${HEALTHCHECK_URL:-}" ]; then
+    curl -fsS -m 10 --retry 3 "${HEALTHCHECK_URL}" >/dev/null 2>&1 \
+        && log "pinged healthcheck OK" \
+        || log "warning: healthcheck ping failed"
+fi
+
 log "done."

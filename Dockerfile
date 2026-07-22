@@ -24,9 +24,25 @@ RUN set -eux; \
         $PHPIZE_DEPS libxml2-dev; \
     rm -rf /var/lib/apt/lists/*
 
-# wp-cli (used by the wp-cron sidecar and for maintenance)
+# wp-cli (used by the wp-cron sidecar and for maintenance).
+# The .phar is an executable we download at build time, so verify it against
+# the SHA-512 published next to it before trusting/using it. We fetch the
+# checksum from the same source, which gives transport integrity (a corrupted
+# or truncated download fails the build).
+# NOTE: this tracks the current stable wp-cli. To fully PIN a version for
+# reproducible builds, replace the URLs with a tagged GitHub release asset
+# (https://github.com/wp-cli/wp-cli/releases/download/vX.Y.Z/wp-cli-X.Y.Z.phar)
+# and hardcode that release's known SHA-512 instead of fetching it.
 RUN set -eux; \
-    curl -fsSL -o /usr/local/bin/wp \
-        https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar; \
+    base="https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar"; \
+    curl -fsSL -o /usr/local/bin/wp        "${base}/wp-cli.phar"; \
+    curl -fsSL -o /tmp/wp-cli.phar.sha512  "${base}/wp-cli.phar.sha512"; \
+    printf '%s  %s\n' "$(cat /tmp/wp-cli.phar.sha512)" /usr/local/bin/wp | sha512sum -c -; \
+    rm -f /tmp/wp-cli.phar.sha512; \
     chmod +x /usr/local/bin/wp; \
     wp --info --allow-root
+
+# Enable mod_remoteip so Apache can derive the real client IP from
+# X-Forwarded-For, but ONLY when the request comes from a trusted proxy
+# (configured in apache/migration.conf via TRUSTED_PROXY_CIDRS).
+RUN a2enmod remoteip

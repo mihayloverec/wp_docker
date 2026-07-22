@@ -1,0 +1,90 @@
+name: CI
+
+# Validate the infrastructure template on every push / PR so regressions
+# (broken compose, shell bugs, undocumented env vars, image CVEs) are caught
+# before they reach a deploy.
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  lint:
+    name: Lint (yaml / shell / dockerfiles)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: yamllint (compose files)
+        uses: ibiqlik/action-yamllint@v3
+        with:
+          file_or_dir: docker-compose.yml proxy-caddy/docker-compose.yml
+          config_data: |
+            extends: default
+            rules:
+              line-length: disable
+              document-start: disable
+              comments:
+                min-spaces-from-content: 1
+              truthy:
+                check-keys: false
+
+      - name: shellcheck (backup + verify scripts)
+        uses: ludeeus/action-shellcheck@master
+        with:
+          scandir: '.'
+          severity: warning
+
+      - name: hadolint (wordpress image)
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+
+      - name: hadolint (backup image)
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: backup/Dockerfile
+
+  validate:
+    name: Compose config + env completeness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: docker compose config (main stack, all profiles)
+        run: docker compose --env-file .env.example --profile backup config -q
+
+      - name: docker compose config (caddy edge proxy)
+        run: docker compose -f proxy-caddy/docker-compose.yml --env-file proxy-caddy/.env.example config -q
+
+      - name: .env.example documents every required compose var
+        run: sh ci/check-env-vars.sh
+
+  build-scan:
+    name: Build images + Trivy scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build wordpress image
+        run: docker build -t wp-stack:ci .
+
+      - name: Build backup image
+        run: docker build -t wp-backup:ci ./backup
+
+      - name: Trivy scan (wordpress image)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: wp-stack:ci
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          # Report only — don't fail the build on unpatched base-image CVEs.
+          exit-code: '0'
+
+      - name: Trivy scan (backup image)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: wp-backup:ci
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '0'
