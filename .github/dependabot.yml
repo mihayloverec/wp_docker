@@ -1,0 +1,43 @@
+# Dependabot — automatically open PRs when newer versions are released, so
+# "is there a new WordPress?" is checked continuously by GitHub, not by hand.
+# https://docs.github.com/code-security/dependabot/dependabot-version-updates
+version: 2
+updates:
+  # WordPress + PHP base image (Dockerfile) and the MariaDB / Redis images
+  # referenced in docker-compose.yml at the repo root.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
+    labels:
+      - "dependencies"
+      - "docker"
+    groups:
+      docker-images:
+        patterns:
+          - "*"
+
+  # Backup image base (backup/Dockerfile → mariadb).
+  - package-ecosystem: "docker"
+    directory: "/backup"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "deps"
+    labels:
+      - "dependencies"
+      - "docker"
+
+  # GitHub Actions pinned in the CI workflow.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "ci"
+    labels:
+      - "dependencies"
+      - "github-actions"
