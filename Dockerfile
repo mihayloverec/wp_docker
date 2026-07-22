@@ -5,7 +5,7 @@
 #    - soap:            some WooCommerce payment/shipping gateways
 #    - wp-cli:          real cron runner + maintenance commands
 # =====================================================================
-FROM wordpress:6.8.3-php8.2-apache
+FROM wordpress:7.0.2-php8.3-apache
 
 ARG PHPREDIS_VERSION=6.2.0
 

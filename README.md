@@ -65,7 +65,7 @@ terminates HTTPS for all sites.
         ┌─────────────────────┼─────────────────────┐
         │                     │                      │
    ┌────▼─────┐  site stack (STACK_NAME-prefixed, repeated per site)
-   │ wordpress│  Apache + PHP 8.2 (custom image: phpredis, soap, wp-cli)
+   │ wordpress│  Apache + PHP 8.3 (custom image: phpredis, soap, wp-cli)
    └────┬─────┘
         │  internal network (private, per-stack)
    ┌────┴─────┬───────────┬──────────────┐
@@ -81,7 +81,7 @@ terminates HTTPS for all sites.
 
 | Service     | Image / build                         | Role |
 |-------------|---------------------------------------|------|
-| `wordpress` | custom `Dockerfile` (Apache, PHP 8.2) | The site. Tuned via `php/php.ini` + `apache/migration.conf`. |
+| `wordpress` | custom `Dockerfile` (Apache, PHP 8.3) | The site. Tuned via `php/php.ini` + `apache/migration.conf`. |
 | `wp-cron`   | same custom image                     | Sidecar running **real** WP-Cron every 60s via wp-cli (visitor pseudo-cron is disabled). |
 | `db`        | `mariadb:11.4`                        | Database, tuned via `mariadb/my.cnf`. |
 | `redis`     | `redis:7.4-alpine`                    | Persistent object cache (LRU eviction, password-protected). |
@@ -261,6 +261,28 @@ cp php/php.ini.light.example  php/php.ini   # small blog / brochure
 cp php/php.ini.medium.example php/php.ini   # mid-size WooCommerce
 docker compose up -d wordpress              # apply
 ```
+
+### Which php.ini profile to choose?
+
+Match the profile to what the site is built with and the RAM you can give it:
+
+| Profile | Best for | `memory_limit` / OPcache | RAM per site |
+|---------|----------|--------------------------|:------------:|
+| **Light** — `php.ini.light.example` | blog, landing, brochure; few plugins, no shop | 256M / 128M, 20k files | ~0.8–1 GB |
+| **Medium** — `php.ini.medium.example` | corporate site, light WooCommerce | 512M / 256M, 20k files | ~1.5–2 GB |
+| **Heavy** — `php.ini` (the default) | big Elementor + WooCommerce shop, many add-ons | 1024M / 512M, 50k files | ~3–4 GB |
+
+Decision rules:
+
+- **In doubt, or building with Elementor + WooCommerce → Heavy.** Under-provisioned
+  PHP shows up as *"Allowed memory exhausted"* errors and a sluggish admin.
+- **Packing several sites on one server → downsize the lighter ones** so the total
+  fits RAM (always leave 1–2 GB for the host + proxy).
+- **After copying a profile, keep `.env` in step:** `WP_MEMORY_LIMIT` must stay ≤ the
+  profile's `memory_limit`, and align `WP_MEM_LIMIT` / `DB_MEM_LIMIT` with the RAM
+  column above (full table in [Resource profiles](#resource-profiles)).
+- You can always **start Light and move up later** — copy a heavier profile over
+  `php.ini` and `docker compose up -d wordpress`; no data is affected.
 
 **Sizing rule of thumb:** set `innodb_buffer_pool_size` to ~50–70% of the RAM you
 give the DB container (`DB_MEM_LIMIT`). On bigger servers raise both together.
@@ -540,7 +562,7 @@ HTTPS для всех сайтов.
         ┌─────────────────────┼─────────────────────┐
         │                     │                      │
    ┌────▼─────┐  стек сайта (префикс STACK_NAME, повторяется для каждого сайта)
-   │ wordpress│  Apache + PHP 8.2 (свой образ: phpredis, soap, wp-cli)
+   │ wordpress│  Apache + PHP 8.3 (свой образ: phpredis, soap, wp-cli)
    └────┬─────┘
         │  сеть internal (приватная, для каждого стека)
    ┌────┴─────┬───────────┬──────────────┐
@@ -556,7 +578,7 @@ HTTPS для всех сайтов.
 
 | Сервис      | Образ / сборка                        | Роль |
 |-------------|---------------------------------------|------|
-| `wordpress` | свой `Dockerfile` (Apache, PHP 8.2)   | Сам сайт. Тюнинг через `php/php.ini` + `apache/migration.conf`. |
+| `wordpress` | свой `Dockerfile` (Apache, PHP 8.3)   | Сам сайт. Тюнинг через `php/php.ini` + `apache/migration.conf`. |
 | `wp-cron`   | тот же образ                          | Сайдкар, запускающий **настоящий** WP-Cron каждые 60 сек через wp-cli (псевдо-крон по визитам отключён). |
 | `db`        | `mariadb:11.4`                        | База данных, тюнинг через `mariadb/my.cnf`. |
 | `redis`     | `redis:7.4-alpine`                    | Постоянный объектный кэш (вытеснение LRU, пароль). |
@@ -736,6 +758,28 @@ cp php/php.ini.light.example  php/php.ini   # маленький блог / ви
 cp php/php.ini.medium.example php/php.ini   # средний WooCommerce
 docker compose up -d wordpress              # применить
 ```
+
+### Какой профиль php.ini выбрать?
+
+Ориентируйтесь на то, на чём построен сайт, и на доступную ему RAM:
+
+| Профиль | Для чего | `memory_limit` / OPcache | RAM на сайт |
+|---------|----------|--------------------------|:-----------:|
+| **Light** — `php.ini.light.example` | блог, лендинг, визитка; мало плагинов, без магазина | 256M / 128M, 20k файлов | ~0.8–1 ГБ |
+| **Medium** — `php.ini.medium.example` | корпоративный сайт, лёгкий WooCommerce | 512M / 256M, 20k файлов | ~1.5–2 ГБ |
+| **Heavy** — `php.ini` (по умолчанию) | большой магазин Elementor + WooCommerce, много аддонов | 1024M / 512M, 50k файлов | ~3–4 ГБ |
+
+Правила выбора:
+
+- **Сомневаетесь или строите на Elementor + WooCommerce → Heavy.** Нехватка памяти
+  PHP проявляется ошибками *«Allowed memory exhausted»* и тормозной админкой.
+- **Несколько сайтов на одном сервере → уменьшайте лёгкие**, чтобы суммарно
+  влезло в RAM (всегда оставляйте 1–2 ГБ хосту + прокси).
+- **После копирования профиля держите `.env` в согласии:** `WP_MEMORY_LIMIT` должен
+  быть ≤ `memory_limit` профиля, а `WP_MEM_LIMIT` / `DB_MEM_LIMIT` — соответствовать
+  колонке RAM выше (полная таблица в разделе [Профили ресурсов](#профили-ресурсов)).
+- Можно **начать с Light и позже перейти выше** — скопировать более тяжёлый профиль
+  поверх `php.ini` и `docker compose up -d wordpress`; данные не затрагиваются.
 
 **Правило размера:** ставьте `innodb_buffer_pool_size` ~50–70% от RAM, выделенной
 контейнеру БД (`DB_MEM_LIMIT`). На больших серверах поднимайте оба вместе.

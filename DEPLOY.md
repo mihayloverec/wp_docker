@@ -26,7 +26,7 @@ Treat them as secrets:
 ## What is included
 
 - `docker-compose.yml` with services:
-  - `wordpress` (Apache, PHP 8.2) — built from `Dockerfile`, tuned via `php/php.ini`
+  - `wordpress` (Apache, PHP 8.3) — built from `Dockerfile`, tuned via `php/php.ini`
   - `wp-cron` — sidecar running real WP-Cron every 60s (reliable scheduled events)
   - `mariadb` — tuned via `mariadb/my.cnf`
   - `redis` — object cache (LRU eviction, password-protected)
@@ -240,7 +240,7 @@ green. What's already handled and the few manual items:
 
 | Site Health item | Status | Notes |
 |------------------|--------|-------|
-| PHP version (8.2), required modules | ✅ | imagick, gd, intl, zip, exif, soap, redis all present |
+| PHP version (8.3), required modules | ✅ | imagick, gd, intl, zip, exif, soap, redis all present |
 | Persistent object cache | ⚙️ manual | Enable Redis Object Cache plugin (step 7) |
 | Scheduled events / WP-Cron | ✅ | Real cron via the `wp-cron` sidecar (pseudo-cron disabled) |
 | HTTPS status | ✅ | `X-Forwarded-Proto` from NPM is honored; set `WP_HOME/WP_SITEURL` to `https://` |
