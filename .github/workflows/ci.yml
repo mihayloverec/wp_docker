@@ -13,7 +13,7 @@ jobs:
     name: Lint (yaml / shell / dockerfiles)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: yamllint (compose files)
         uses: ibiqlik/action-yamllint@v3
@@ -53,7 +53,7 @@ jobs:
     name: Compose config + env completeness
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: docker compose config (main stack, all profiles)
         run: docker compose --env-file .env.example --profile backup config -q
@@ -68,7 +68,7 @@ jobs:
     name: Build images + Trivy scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Build wordpress image
         run: docker build -t wp-stack:ci .
