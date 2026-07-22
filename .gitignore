@@ -12,5 +12,5 @@
 # Local verification artifacts
 .verify/
 
-# Local Claude Code tooling config
-.claude/
+# Local compose override (dev-only)
+docker-compose.override.yml

@@ -1,11 +1,12 @@
 name: ${STACK_NAME:-wordpress}
 
 # Shared logging policy: cap container logs so disk never fills up.
+# max-size 10m + max-file 1 => at most ~10 MB of logs per container.
 x-logging: &default-logging
   driver: json-file
   options:
     max-size: "10m"
-    max-file: "5"
+    max-file: "1"
 
 # DB/WordPress env shared by the web container and the wp-cron sidecar.
 # wp-cli in the sidecar reads these to connect to the same database.
@@ -15,6 +16,19 @@ x-wp-db-env: &wp-db-env
   WORDPRESS_DB_USER: ${MYSQL_USER}
   WORDPRESS_DB_PASSWORD: ${MYSQL_PASSWORD}
   WORDPRESS_TABLE_PREFIX: ${WORDPRESS_TABLE_PREFIX}
+
+# SMTP relay for plugin-free outgoing mail (msmtp shim, see mail/wp-sendmail.sh).
+# Needed by BOTH the web container and wp-cron (WooCommerce/notification
+# emails are sent during cron runs). Empty SMTP_HOST => mail disabled.
+x-smtp-env: &smtp-env
+  SMTP_HOST: ${SMTP_HOST:-}
+  SMTP_PORT: ${SMTP_PORT:-587}
+  SMTP_USER: ${SMTP_USER:-}
+  SMTP_PASS: ${SMTP_PASS:-}
+  SMTP_FROM: ${SMTP_FROM:-}
+  SMTP_AUTH: ${SMTP_AUTH:-on}
+  SMTP_TLS: ${SMTP_TLS:-on}
+  SMTP_STARTTLS: ${SMTP_STARTTLS:-on}
 
 services:
   db:
@@ -99,7 +113,7 @@ services:
       redis:
         condition: service_healthy
     environment:
-      <<: *wp-db-env
+      <<: [*wp-db-env, *smtp-env]
       WORDPRESS_DEBUG: ${WORDPRESS_DEBUG}
       # Trusted proxy CIDRs for Apache mod_remoteip (apache/migration.conf).
       # Default trusts private ranges; narrow to your edge proxy's subnet.
@@ -205,7 +219,7 @@ services:
       wordpress:
         condition: service_healthy
     environment:
-      <<: *wp-db-env
+      <<: [*wp-db-env, *smtp-env]
     working_dir: /var/www/html
     volumes:
       - wp_data:/var/www/html
@@ -218,11 +232,11 @@ services:
           if wp core is-installed --quiet 2>/dev/null; then
             # Don't hide failures: capture output + exit code, log on error,
             # and stamp a success file so the healthcheck can see cron is alive.
-            if out="$(wp cron event run --due-now 2>&1)"; then
+            if out="$$(wp cron event run --due-now 2>&1)"; then
               date +%s > /tmp/wp-cron-last-success
             else
-              rc=$?
-              echo "[wp-cron] cron run FAILED (exit $rc): $out"
+              rc=$$?
+              echo "[wp-cron] cron run FAILED (exit $$rc): $$out"
             fi
           else
             echo "[wp-cron] WordPress not installed yet; waiting"

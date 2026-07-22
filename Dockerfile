@@ -11,7 +11,10 @@ ARG PHPREDIS_VERSION=6.2.0
 
 RUN set -eux; \
     apt-get update; \
-    apt-get install -y --no-install-recommends $PHPIZE_DEPS libxml2-dev less; \
+    # msmtp + ca-certificates are RUNTIME deps (plugin-free SMTP mail);
+    # they are intentionally NOT in the purge list below.
+    apt-get install -y --no-install-recommends \
+        $PHPIZE_DEPS libxml2-dev less msmtp ca-certificates; \
     # phpredis for Redis Object Cache (PhpRedis client = fast path).
     # Built from the GitHub tarball — more reliable than the pecl channel.
     mkdir -p /usr/src/php/ext/redis; \
@@ -46,3 +49,8 @@ RUN set -eux; \
 # X-Forwarded-For, but ONLY when the request comes from a trusted proxy
 # (configured in apache/migration.conf via TRUSTED_PROXY_CIDRS).
 RUN a2enmod remoteip
+
+# Plugin-free outgoing mail: PHP's sendmail_path (php/php.ini) points at
+# this shim, which relays through msmtp using the SMTP_* env vars.
+COPY mail/wp-sendmail.sh /usr/local/bin/wp-sendmail
+RUN chmod +x /usr/local/bin/wp-sendmail
