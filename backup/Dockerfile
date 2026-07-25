@@ -12,9 +12,14 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*; \
     mkdir -p /var/lib/backup
 
+# lib.sh is sourced (not executed) by backup.sh and restore.sh so the two
+# can never disagree about the remote layout or encryption settings.
+COPY lib.sh /usr/local/bin/lib.sh
 COPY backup.sh /usr/local/bin/backup.sh
+COPY restore.sh /usr/local/bin/restore.sh
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY healthcheck.sh /usr/local/bin/healthcheck.sh
-RUN chmod +x /usr/local/bin/backup.sh /usr/local/bin/entrypoint.sh /usr/local/bin/healthcheck.sh
+RUN chmod +x /usr/local/bin/backup.sh /usr/local/bin/restore.sh \
+             /usr/local/bin/entrypoint.sh /usr/local/bin/healthcheck.sh
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
