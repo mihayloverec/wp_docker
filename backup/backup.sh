@@ -26,11 +26,12 @@ ARCHIVE=""
 
 load_secret_files
 setup_remote
+DB_CNF="$(setup_db_credentials)"
 
 # Always clean up local copies, including on failure — otherwise a
 # repeatedly failing run slowly fills the disk with half-written dumps.
 DUMP="${WORKDIR}/${MYSQL_DATABASE}-${TS}.sql.gz"
-cleanup() { rm -f "${DUMP}" "${ARCHIVE}"; }
+cleanup() { rm -f "${DUMP}" "${ARCHIVE}" "${DB_CNF}"; }
 trap cleanup EXIT
 
 # --- 1) Preflight: is there room for the dump? ----------------------
@@ -41,9 +42,8 @@ trap cleanup EXIT
 # bound: gzip -9 typically shrinks a WP dump 5-10x, so passing this check
 # leaves ample margin.
 db_size_mb="$(mariadb \
+    --defaults-extra-file="${DB_CNF}" \
     --host="${DB_HOST}" \
-    --user="${MYSQL_USER}" \
-    --password="${MYSQL_PASSWORD}" \
     --skip-column-names --batch \
     -e "SELECT COALESCE(CEIL(SUM(data_length+index_length)/1048576),0)
         FROM information_schema.tables WHERE table_schema='${MYSQL_DATABASE}';" \
@@ -62,9 +62,8 @@ fi
 # --- 2) Database ----------------------------------------------------
 log "dumping database '${MYSQL_DATABASE}' from ${DB_HOST} ..."
 mariadb-dump \
+    --defaults-extra-file="${DB_CNF}" \
     --host="${DB_HOST}" \
-    --user="${MYSQL_USER}" \
-    --password="${MYSQL_PASSWORD}" \
     --single-transaction --quick --routines --triggers --events \
     --default-character-set=utf8mb4 \
     "${MYSQL_DATABASE}" | gzip -9 > "${DUMP}"

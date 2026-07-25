@@ -47,6 +47,9 @@ done
 
 load_secret_files
 setup_remote
+# 0600 file so the DB password stays out of argv (see lib.sh).
+DB_CNF="$(setup_db_credentials)"
+trap 'rm -f "${DB_CNF}"' EXIT
 
 # Resolve "latest" (or a literal name) to an object in the given prefix.
 # Names are timestamped YYYYMMDD-HHMMSS, so lexicographic sort == chronological.
@@ -113,17 +116,17 @@ db)
     # dump is a common panic-mistake, and without this it is irreversible.
     SAFETY="${WORKDIR}/pre-restore-$(date +%Y%m%d-%H%M%S).sql.gz"
     log "snapshotting current database to ${SAFETY} before overwriting ..."
-    mariadb-dump --host="${DB_HOST}" --user="${MYSQL_USER}" \
-        --password="${MYSQL_PASSWORD}" --single-transaction --quick \
+    mariadb-dump --defaults-extra-file="${DB_CNF}" --host="${DB_HOST}" \
+        --single-transaction --quick \
         --routines --triggers --events --default-character-set=utf8mb4 \
         "${MYSQL_DATABASE}" | gzip -9 > "${SAFETY}"
     gzip -t "${SAFETY}" || fail "pre-restore snapshot is corrupt — aborting before any change"
     log "snapshot OK. If this restore is wrong, undo it with:"
-    log "  gzip -dc ${SAFETY} | mariadb -h ${DB_HOST} -u\$MYSQL_USER -p\$MYSQL_PASSWORD ${MYSQL_DATABASE}"
+    log "  gzip -dc ${SAFETY} | mariadb -h ${DB_HOST} -u\"\$MYSQL_USER\" -p\"\$MYSQL_PASSWORD\" ${MYSQL_DATABASE}"
 
     log "restoring ${MYSQL_DATABASE} from $(basename "${f}") ..."
-    gzip -dc "${f}" | mariadb --host="${DB_HOST}" --user="${MYSQL_USER}" \
-        --password="${MYSQL_PASSWORD}" --default-character-set=utf8mb4 "${MYSQL_DATABASE}"
+    gzip -dc "${f}" | mariadb --defaults-extra-file="${DB_CNF}" \
+        --host="${DB_HOST}" --default-character-set=utf8mb4 "${MYSQL_DATABASE}"
     rm -f "${f}"
     log "restore complete. Now flush caches:"
     log "  docker compose exec -u www-data wordpress wp cache flush"

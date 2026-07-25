@@ -68,6 +68,12 @@ case "${DOMAIN}" in
     http://*|https://*) die "give DOMAIN without a scheme (e.g. shop.example.org)" ;;
     *example.com*)      die "'${DOMAIN}' is the template placeholder — use your real domain" ;;
 esac
+# The domain is written into WP_HOME/WP_SITEURL, which docker-compose.yml
+# interpolates inside single-quoted PHP literals in wp-config.php. Restrict it
+# to hostname characters so it cannot carry a quote or backslash that would
+# escape that literal — see the wp-config.php check in verify.sh.
+printf '%s' "${DOMAIN}" | grep -Eq '^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$' \
+    || die "domain '${DOMAIN}' may only contain letters, digits, dots and hyphens"
 
 # --- generate secrets -----------------------------------------------
 # base64 of 24 random bytes = 32 chars, no quoting hazards in .env or in a

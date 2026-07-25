@@ -6,6 +6,10 @@
 #  it produces a confident "OK to deploy" either way.
 #
 #  Each case builds a .env in a temp dir and asserts verify.sh's verdict.
+#  VERIFY_SKIP_ENV_CHECKS=1 disables the two machine probes (host port in use,
+#  docker network present) so results depend only on the .env under test.
+#  Without it these tests pass or fail based on whether the runner has docker
+#  and whether port 8088 is taken — which is exactly how they broke in CI.
 #  Usage:  sh ci/test-verify.sh      (run from the repo root)
 # ---------------------------------------------------------------------
 set -eu
@@ -65,7 +69,7 @@ set_var() {
 # expect <pass|fail> <description>
 expect() {
     want="$1"; desc="$2"
-    if (cd "${REPO}" && sh verify.sh "${TMP}/.env" >"${TMP}/out" 2>&1); then
+    if (cd "${REPO}" && VERIFY_SKIP_ENV_CHECKS=1 sh verify.sh "${TMP}/.env" >"${TMP}/out" 2>&1); then
         got="pass"
     else
         got="fail"
@@ -123,6 +127,21 @@ expect fail "rejects a non-boolean DISALLOW_FILE_MODS (fatal PHP error)"
 
 make_env; set_var DISALLOW_FILE_MODS "true"
 expect pass "accepts DISALLOW_FILE_MODS=true"
+
+# --- wp-config.php literal escapes (code execution) -----------------
+# These values land inside single-quoted PHP literals in wp-config.php, so a
+# quote or backslash turns config into code.
+make_env; set_var WP_HOME "https://ci.test.local'); system(\$_GET[0]); //"
+expect fail "rejects a single quote in WP_HOME (PHP injection)"
+
+make_env; set_var REDIS_PASSWORD "aVeryLongPassword'with-quote"
+expect fail "rejects a single quote in REDIS_PASSWORD"
+
+make_env; set_var STACK_NAME "ci\\bad"
+expect fail "rejects a backslash in STACK_NAME"
+
+make_env; set_var WP_ENVIRONMENT_TYPE "production\$(id)"
+expect fail "rejects a \$ in WP_ENVIRONMENT_TYPE"
 
 # --- schedule -------------------------------------------------------
 make_env; set_var BACKUP_HOUR "24"

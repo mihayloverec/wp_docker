@@ -19,16 +19,37 @@
 	# acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
 }
 
+# Reusable snippet for every site block below. Caddy does automatic HTTPS but
+# does NOT send HSTS on its own, so without this a first visit over http:// is
+# still interceptable before the redirect happens.
+#
+# READ BEFORE ENABLING: max-age is a promise browsers cache. For a year after
+# a visit, that host is https-only for that browser — you cannot undo it by
+# removing the header. Start with a short max-age (300) to confirm every
+# subdomain and asset really works over HTTPS, then raise it.
+# Drop `includeSubDomains` if any subdomain is http-only.
+(security_headers) {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		# Don't advertise the proxy.
+		-Server
+	}
+}
+
 # ---- Site 1 — uncomment and edit for your first site ----------------
 # Replace example.com with your domain and <STACK_NAME> with the site's
 # STACK_NAME from its .env (the upstream is <STACK_NAME>_wordpress:80).
 # example.com, www.example.com {
+# 	import security_headers
 # 	encode zstd gzip
 # 	reverse_proxy wordpress_wordpress:80
 # }
 
 # ---- Site 2 (copy this block per additional site) -------------------
 # anothersite.com, www.anothersite.com {
+# 	import security_headers
 # 	encode zstd gzip
 # 	reverse_proxy anothersite_wordpress:80
 # }

@@ -534,6 +534,14 @@ alternative is external monitoring watching container health.
   documents exactly what it does and does not cover.
 - **If a secret leaks** (committed, pasted, shared): rotate it — change DB/Redis
   passwords, revoke+reissue S3 keys in the provider panel.
+- Keep `.env` values free of `'`, `"`, `\`, `$` and backticks. `WP_HOME`,
+  `REDIS_PASSWORD`, `STACK_NAME` and friends are interpolated **inside
+  single-quoted PHP literals** in `wp-config.php`, so a quote escapes the
+  literal and the rest becomes executable PHP. `./verify.sh` rejects this, but
+  the Portainer UI path never runs it — so it matters when setting variables
+  there. `./init.sh` only generates safe characters.
+- `./verify.sh` **parses** `.env`, it does not source it, so validating a file
+  someone sent you cannot execute anything.
 
 **Backups** (details in [BACKUP.md](BACKUP.md))
 
@@ -553,10 +561,15 @@ alternative is external monitoring watching container health.
 - The host port is bound to `127.0.0.1` unless you explicitly set `WP_HTTP_BIND`.
 - Narrow `TRUSTED_PROXY_CIDRS` to your edge proxy's subnet. It controls who is
   allowed to set the client IP via `X-Forwarded-For`; the default trusts all
-  private ranges, which includes every other container on the proxy network.
+  private ranges, which includes every other container on the proxy network —
+  and a spoofable client IP defeats every per-IP block and rate limit.
+  `./verify.sh` warns while it is still the default.
+- Import the `security_headers` snippet in each Caddy site block: Caddy does
+  automatic HTTPS but sends **no HSTS** on its own, so a first visit over
+  http:// stays interceptable. Read the max-age warning in the Caddyfile first.
 - [`apache/hardening.conf`](apache/hardening.conf) blocks PHP execution in
-  `wp-content/uploads`, denies `xmlrpc.php`, `debug.log`, `wp-config.php`,
-  `readme.html` and dotfiles, disables directory listings, and sets
+  `wp-content/uploads`, denies `xmlrpc.php`, `wp-cron.php` (real cron runs in
+  the sidecar), `debug.log`, `wp-config.php`, `readme.html` and dotfiles, disables directory listings, and sets
   `X-Content-Type-Options` / `X-Frame-Options` / `Referrer-Policy`.
   **Uncomment the `xmlrpc.php` block** if you use the WordPress mobile app or
   Jetpack.
@@ -1155,6 +1168,14 @@ COMPOSE_PROFILES=backup,autoheal
   заголовке описано, что он закрывает, а что — нет.
 - **Если секрет утёк** (закоммичен, вставлен, передан): ротируйте — смените пароли
   БД/Redis, отзовите и перевыпустите ключи S3 в панели провайдера.
+- В значениях `.env` не должно быть `'`, `"`, `\`, `$` и обратных кавычек.
+  `WP_HOME`, `REDIS_PASSWORD`, `STACK_NAME` и другие подставляются **внутрь
+  одинарных кавычек PHP-литерала** в `wp-config.php`, поэтому кавычка закрывает
+  литерал, а остаток строки становится исполняемым PHP. `./verify.sh` это
+  отклоняет, но путь через UI Portainer его не запускает — так что при задании
+  переменных там это важно. `./init.sh` генерирует только безопасные символы.
+- `./verify.sh` **разбирает** `.env`, а не исполняет его, поэтому проверка
+  присланного кем-то файла не может ничего запустить.
 
 **Бэкапы** (подробности в [BACKUP.md](BACKUP.md))
 
@@ -1174,10 +1195,16 @@ COMPOSE_PROFILES=backup,autoheal
 - Хост-порт привязан к `127.0.0.1`, если вы явно не задали `WP_HTTP_BIND`.
 - Сузьте `TRUSTED_PROXY_CIDRS` до подсети своего edge-прокси. Он определяет, кому
   разрешено задавать IP клиента через `X-Forwarded-For`; по умолчанию доверяются
-  все приватные диапазоны, а это все остальные контейнеры в сети прокси.
+  все приватные диапазоны, а это все остальные контейнеры в сети прокси — и
+  подделываемый IP клиента обесценивает любую блокировку и лимит по IP.
+  `./verify.sh` предупреждает, пока значение остаётся дефолтным.
+- Подключайте сниппет `security_headers` в каждом блоке сайта Caddy: Caddy делает
+  автоматический HTTPS, но **не отправляет HSTS** сам, поэтому первый визит по
+  http:// остаётся перехватываемым. Сначала прочитайте предупреждение про
+  max-age в Caddyfile.
 - [`apache/hardening.conf`](apache/hardening.conf) запрещает выполнение PHP в
-  `wp-content/uploads`, закрывает `xmlrpc.php`, `debug.log`, `wp-config.php`,
-  `readme.html` и дот-файлы, отключает листинги каталогов и ставит
+  `wp-content/uploads`, закрывает `xmlrpc.php`, `wp-cron.php` (настоящий крон
+  живёт в сайдкаре), `debug.log`, `wp-config.php`, `readme.html` и дот-файлы, отключает листинги каталогов и ставит
   `X-Content-Type-Options` / `X-Frame-Options` / `Referrer-Policy`.
   **Раскомментируйте блок `xmlrpc.php`**, если пользуетесь мобильным приложением
   WordPress или Jetpack.

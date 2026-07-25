@@ -171,6 +171,7 @@ jobs:
             'mkdir -p wp-content/uploads && echo "<?php echo 42;" > wp-content/uploads/probe.php'
           check "wp-content/uploads/probe.php" 403 "PHP execution denied in uploads"
           check "xmlrpc.php"                   403 "xmlrpc.php denied"
+          check "wp-cron.php"                  403 "wp-cron.php denied"
           check "readme.html"                  403 "readme.html denied (version disclosure)"
           docker compose exec -T -u www-data wordpress sh -c \
             'echo "secret" > wp-content/debug.log'
@@ -198,7 +199,8 @@ jobs:
           done
           docker compose exec -T -u www-data wordpress \
             test -f /var/www/html/wp-content/object-cache.php \
-            || { echo "drop-in never appeared"; docker compose logs wp-cron; exit 1; }
+            || { echo "::error::Redis object-cache drop-in never appeared"; \
+                 echo "--- wp-cron log ---"; docker compose logs --no-color wp-cron; exit 1; }
           docker compose exec -T -u www-data wordpress wp redis status
           docker compose exec -T -u www-data wordpress wp redis status | grep -qi 'connected'
 
@@ -284,13 +286,19 @@ jobs:
           output: trivy-backup.sarif
           exit-code: '0'
 
+      # Fork PRs get a read-only token no matter what `permissions:` says, so
+      # security-events: write is not granted and this step would 403. Skip it
+      # there rather than failing every external contribution; the scan itself
+      # still runs and its findings are in the job log.
       - name: Upload wordpress scan to the Security tab
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         uses: github/codeql-action/upload-sarif@4187e74d05793876e9989daffde9c3e66b4acd07 # v3
         with:
           sarif_file: trivy-wordpress.sarif
           category: trivy-wordpress
 
       - name: Upload backup scan to the Security tab
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         uses: github/codeql-action/upload-sarif@4187e74d05793876e9989daffde9c3e66b4acd07 # v3
         with:
           sarif_file: trivy-backup.sarif

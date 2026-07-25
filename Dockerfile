@@ -8,6 +8,13 @@
 FROM wordpress:7.0.2-php8.3-apache
 
 ARG PHPREDIS_VERSION=6.2.0
+# sha256 of the 6.2.0 source tarball. A version tag alone is NOT an integrity
+# guarantee: git tags can be moved, and GitHub regenerates archive tarballs, so
+# "6.2.0" is a name, not a fingerprint. This extension is compiled and loaded
+# into every single request, so it gets verified before it is trusted.
+# When bumping PHPREDIS_VERSION, update this too:
+#   curl -fsSL .../<ver>.tar.gz | sha256sum
+ARG PHPREDIS_SHA256=470333b27cbf9485d36b610b81300c06491a6575f22c6801a9cefc55285ed123
 
 RUN set -eux; \
     apt-get update; \
@@ -17,9 +24,14 @@ RUN set -eux; \
         $PHPIZE_DEPS libxml2-dev msmtp ca-certificates; \
     # phpredis for Redis Object Cache (PhpRedis client = fast path).
     # Built from the GitHub tarball — more reliable than the pecl channel.
+    # Downloaded to a file (not piped into tar) so the checksum can be checked
+    # BEFORE anything is unpacked and compiled.
+    curl -fsSL -o /tmp/phpredis.tar.gz \
+        "https://github.com/phpredis/phpredis/archive/refs/tags/${PHPREDIS_VERSION}.tar.gz"; \
+    echo "${PHPREDIS_SHA256}  /tmp/phpredis.tar.gz" | sha256sum -c -; \
     mkdir -p /usr/src/php/ext/redis; \
-    curl -fsSL "https://github.com/phpredis/phpredis/archive/refs/tags/${PHPREDIS_VERSION}.tar.gz" \
-        | tar xz -C /usr/src/php/ext/redis --strip-components=1; \
+    tar xzf /tmp/phpredis.tar.gz -C /usr/src/php/ext/redis --strip-components=1; \
+    rm -f /tmp/phpredis.tar.gz; \
     docker-php-ext-install -j"$(nproc)" redis soap; \
     docker-php-source delete; \
     # Drop build-only deps; runtime libs (libxml2 etc.) stay as base deps.
@@ -28,20 +40,23 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*
 
 # wp-cli (used by the wp-cron sidecar and for maintenance).
-# The .phar is an executable we download at build time, so verify it against
-# the SHA-512 published next to it before trusting/using it. We fetch the
-# checksum from the same source, which gives transport integrity (a corrupted
-# or truncated download fails the build).
-# NOTE: this tracks the current stable wp-cli. To fully PIN a version for
-# reproducible builds, replace the URLs with a tagged GitHub release asset
-# (https://github.com/wp-cli/wp-cli/releases/download/vX.Y.Z/wp-cli-X.Y.Z.phar)
-# and hardcode that release's known SHA-512 instead of fetching it.
+#
+# Pinned to a tagged release with the checksum HARDCODED here. The previous
+# approach fetched wp-cli.phar and its .sha512 from the same URL prefix, which
+# only proved the download wasn't corrupted in transit: anyone able to modify
+# that location could serve a different .phar together with a matching hash.
+# A constant committed to this repo is what actually makes the artifact
+# verifiable — the build now fails if the bytes ever differ from these.
+#
+# To upgrade, bump the version and recompute:
+#   curl -fsSL https://github.com/wp-cli/wp-cli/releases/download/v<V>/wp-cli-<V>.phar | sha512sum
+ARG WPCLI_VERSION=2.12.0
+ARG WPCLI_SHA512=be928f6b8ca1e8dfb9d2f4b75a13aa4aee0896f8a9a0a1c45cd5d2c98605e6172e6d014dda2e27f88c98befc16c040cbb2bd1bfa121510ea5cdf5f6a30fe8832
+
 RUN set -eux; \
-    base="https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar"; \
-    curl -fsSL -o /usr/local/bin/wp        "${base}/wp-cli.phar"; \
-    curl -fsSL -o /tmp/wp-cli.phar.sha512  "${base}/wp-cli.phar.sha512"; \
-    printf '%s  %s\n' "$(cat /tmp/wp-cli.phar.sha512)" /usr/local/bin/wp | sha512sum -c -; \
-    rm -f /tmp/wp-cli.phar.sha512; \
+    curl -fsSL -o /usr/local/bin/wp \
+        "https://github.com/wp-cli/wp-cli/releases/download/v${WPCLI_VERSION}/wp-cli-${WPCLI_VERSION}.phar"; \
+    echo "${WPCLI_SHA512}  /usr/local/bin/wp" | sha512sum -c -; \
     chmod +x /usr/local/bin/wp; \
     wp --info --allow-root
 

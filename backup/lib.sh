@@ -40,6 +40,20 @@ load_secret_files() {
 # NOTE: the passphrase is NOT stored anywhere by this stack. Keep it in a
 # password manager — without it the backups are unrecoverable, which is
 # precisely the point.
+# Write a 0600 client config and echo its path, so the DB password never
+# appears in a command line. `mariadb --password=secret` puts the secret in
+# argv, which is readable by anything that can list processes in the
+# container (and MariaDB itself warns about it). --defaults-extra-file must
+# be the FIRST argument to take effect.
+#
+# Callers must delete the file; both scripts do it from their EXIT trap.
+setup_db_credentials() {
+    cnf="$(mktemp /tmp/.my.cnf.XXXXXX)"
+    chmod 600 "${cnf}"
+    printf '[client]\nuser=%s\npassword=%s\n' "${MYSQL_USER}" "${MYSQL_PASSWORD}" > "${cnf}"
+    printf '%s' "${cnf}"
+}
+
 setup_remote() {
     # Empty S3_PATH falls back to STACK_NAME (matches docs), then "wordpress".
     S3_PATH="${S3_PATH:-${STACK_NAME:-wordpress}}"
@@ -57,6 +71,7 @@ setup_remote() {
         DEST="scrypt:"
         log "client-side encryption ENABLED (rclone crypt)"
     else
+        # shellcheck disable=SC2034  # consumed by the sourcing script
         DEST="s3:${S3_BUCKET}/${S3_PATH}"
         log "client-side encryption disabled (set BACKUP_ENCRYPT_PASSWORD to enable)"
     fi

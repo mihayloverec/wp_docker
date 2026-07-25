@@ -107,12 +107,23 @@ services:
       - ${REDIS_MAXMEMORY:-512mb}
       - --maxmemory-policy
       - allkeys-lru
+    environment:
+      TZ: ${TZ}
+      # redis-cli reads the password from REDISCLI_AUTH, so the healthcheck
+      # below does not need `-a <secret>` — which would otherwise put the
+      # password into a command line every 10 seconds, visible to anything
+      # that can list processes.
+      #
+      # NOTE: `--requirepass` in `command:` above IS still argv-visible. Redis
+      # can only take the password from a config file, so removing that last
+      # exposure needs the opt-in docker-compose.secrets.yml overlay.
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
     volumes:
       # Kept mounted so re-enabling persistence needs no volume surgery,
       # but nothing is written to it in the configuration above.
       - redis_data:/data
     healthcheck:
-      test: [ "CMD-SHELL", "[ \"$$(redis-cli --raw -a \"${REDIS_PASSWORD}\" ping 2>/dev/null)\" = \"PONG\" ]" ]
+      test: [ "CMD-SHELL", "[ \"$$(redis-cli --raw ping 2>/dev/null)\" = \"PONG\" ]" ]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -271,6 +282,11 @@ services:
       WP_AUTO_ENABLE_REDIS: ${WP_AUTO_ENABLE_REDIS:-true}
       # Hard ceiling for a single cron run, in seconds (see loop below).
       WP_CRON_TIMEOUT: ${WP_CRON_TIMEOUT:-300}
+      # wp-cli needs a writable cache dir for `wp plugin install`. This
+      # container runs as www-data, whose home (/var/www) is root-owned, so
+      # the default ~/.wp-cli/cache cannot be created and the install fails.
+      # Point it at /tmp — also keeps wp-cli's cache out of the site volume.
+      WP_CLI_CACHE_DIR: /tmp/wp-cli-cache
     working_dir: /var/www/html
     volumes:
       - wp_data:/var/www/html
@@ -285,10 +301,18 @@ services:
         # drop-in exists — which normally means remembering to install and
         # activate a plugin by hand after every deploy. Do it here instead,
         # idempotently: once the drop-in is in place this is a single stat().
+        # Attempts are capped so a permanent failure (no network to
+        # wordpress.org, DISALLOW_FILE_MODS=true, unwritable wp-content)
+        # reports itself clearly instead of retrying every 60s forever.
+        redis_attempts=0
         ensure_redis_cache() {
           [ "$${WP_AUTO_ENABLE_REDIS}" = "true" ] || return 0
           [ -f /var/www/html/wp-content/object-cache.php ] && return 0
-          echo "[wp-cron] installing/enabling Redis object cache drop-in"
+          if [ "$${redis_attempts}" -ge 5 ]; then return 0; fi
+          redis_attempts=$$(( redis_attempts + 1 ))
+          echo "[wp-cron] installing/enabling Redis object cache drop-in (attempt $${redis_attempts}/5)"
+          # Output is deliberately NOT silenced: when this fails, the reason
+          # from wp-cli is the only useful diagnostic.
           wp plugin is-installed redis-cache >/dev/null 2>&1 \
             || wp plugin install redis-cache --activate || return 1
           wp plugin is-active redis-cache >/dev/null 2>&1 \
@@ -299,7 +323,7 @@ services:
 
         while true; do
           if wp core is-installed --quiet 2>/dev/null; then
-            ensure_redis_cache || echo "[wp-cron] WARNING: could not enable Redis object cache"
+            ensure_redis_cache || echo "[wp-cron] WARNING: could not enable Redis object cache (see the wp-cli output above)"
             # Don't hide failures: capture output + exit code, log on error,
             # and stamp a success file so the healthcheck can see cron is alive.
             #
