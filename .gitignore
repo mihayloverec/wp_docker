@@ -6,11 +6,21 @@
 !.env.example
 !**/.env.example
 
+# Secret files used by the optional docker-compose.secrets.yml overlay.
+# These hold raw passwords — the whole directory stays out of git.
+secrets/
+
 # Logs
 *.log
 
 # Local verification artifacts
 .verify/
 
-# Local compose override (dev-only)
+# Local compose override (dev-only, and how the temporary migration
+# profile is mounted — see apache/migration.conf.example)
 docker-compose.override.yml
+# The copy made from apache/migration.conf.example while migrating.
+apache/migration.conf
+
+# Local Claude Code tooling config
+.claude/

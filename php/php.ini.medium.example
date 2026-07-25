@@ -23,6 +23,12 @@ log_errors             = On
 error_reporting        = E_ALL & ~E_DEPRECATED & ~E_STRICT
 error_log              = /dev/stderr
 
+; --- Mail (plugin-free SMTP via msmtp shim) -------------------------
+;  Required in EVERY profile: without it PHP falls back to
+;  /usr/sbin/sendmail, which does not exist in the image, and all outgoing
+;  mail fails. See MAIL.md.
+sendmail_path          = "/usr/local/bin/wp-sendmail"
+
 ; --- Security -------------------------------------------------------
 expose_php             = Off
 allow_url_fopen        = On
@@ -46,5 +52,7 @@ opcache.fast_shutdown           = 1
 opcache.enable_file_override    = 0
 
 ; --- OPcache JIT (PHP 8.x) ------------------------------------------
-opcache.jit                     = tracing
-opcache.jit_buffer_size         = 64M
+;  Off: WordPress is DB/IO-bound, so the JIT buys ~nothing here while
+;  costing RAM per worker and adding a known crash surface. See php.ini.
+opcache.jit                     = off
+opcache.jit_buffer_size         = 0

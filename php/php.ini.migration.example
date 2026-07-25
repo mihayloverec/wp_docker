@@ -1,0 +1,48 @@
+; =====================================================================
+;  TEMPORARY migration profile — NOT mounted by default.
+;
+;  Uploading and extracting a multi-GB Duplicator / WPvivid package needs
+;  limits that are unsafe to keep on a live site: a 900-second
+;  max_execution_time means one stuck request holds a PHP worker for 15
+;  minutes, and a handful of those exhausts the pool while the site
+;  appears to hang. A 2 GB post_max_size lets a single request allocate
+;  gigabytes of RAM. Fine for one afternoon; not a production default.
+;
+;  This file is an OVERRIDE — it is loaded on top of php/php.ini, so it
+;  only needs the values that differ. Everything else (OPcache, security,
+;  sendmail_path) keeps coming from the base profile.
+;
+;  ---------------------------------------------------------------------
+;  HOW TO USE (full procedure in MIGRATION.md)
+;
+;  1) Create docker-compose.override.yml (git-ignored) with BOTH the PHP
+;     and Apache migration overrides:
+;
+;       services:
+;         wordpress:
+;           volumes:
+;             - ./php/php.ini.migration.example:/usr/local/etc/php/conf.d/zzz-migration.ini:ro
+;             - ./apache/migration.conf:/etc/apache2/conf-enabled/zzz-migration.conf:ro
+;
+;     (zzz- makes them load AFTER zz-wordpress.ini / zz-hardening.conf.)
+;     Apache's LimitRequestBody must be lifted too, or it caps the upload
+;     long before PHP sees it — that is what apache/migration.conf does.
+;
+;  2) docker compose up -d wordpress
+;     Confirm:  docker compose exec wordpress php -i | grep post_max_size
+;
+;  3) WHEN DONE — remove the override and restart. Leaving it mounted is
+;     the actual risk this split exists to prevent:
+;       rm docker-compose.override.yml apache/migration.conf
+;       docker compose up -d --force-recreate wordpress
+;       docker compose exec wordpress php -i | grep post_max_size
+; =====================================================================
+
+; --- Uploads / execution: migration-grade only ----------------------
+upload_max_filesize    = 2048M
+post_max_size          = 2048M
+max_execution_time     = 900
+max_input_time         = 900
+memory_limit           = 1024M
+max_file_uploads       = 50
+default_socket_timeout = 600

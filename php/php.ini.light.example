@@ -23,6 +23,12 @@ log_errors             = On
 error_reporting        = E_ALL & ~E_DEPRECATED & ~E_STRICT
 error_log              = /dev/stderr
 
+; --- Mail (plugin-free SMTP via msmtp shim) -------------------------
+;  Required in EVERY profile: without it PHP falls back to
+;  /usr/sbin/sendmail, which does not exist in the image, and all outgoing
+;  mail fails. See MAIL.md.
+sendmail_path          = "/usr/local/bin/wp-sendmail"
+
 ; --- Security -------------------------------------------------------
 expose_php             = Off
 allow_url_fopen        = On

@@ -1,0 +1,59 @@
+# =====================================================================
+#  LIGHT MariaDB profile — small blog / brochure / low-traffic site.
+#  Pairs with php/php.ini.light.example and DB_MEM_LIMIT=512m.
+#  Copy over mariadb/my.cnf to use it (the compose mount always reads
+#  mariadb/my.cnf):
+#    cp mariadb/my.cnf.light.example mariadb/my.cnf
+#    docker compose up -d db
+#
+#  SIZING RULE: innodb_buffer_pool_size must stay well below the
+#  container's DB_MEM_LIMIT (.env) — the pool is not MariaDB's only
+#  consumer, and a pool that doesn't fit gets the process OOM-killed
+#  instead of merely running slowly. Roughly 50% of DB_MEM_LIMIT is a
+#  safe starting point; ./verify.sh checks the relationship for you.
+# =====================================================================
+
+[mysqld]
+# --- Character set / collation (utf8mb4 everywhere) -----------------
+character-set-server         = utf8mb4
+collation-server             = utf8mb4_unicode_ci
+
+# --- Connections ----------------------------------------------------
+max_connections              = 60
+max_allowed_packet           = 128M
+wait_timeout                 = 300
+interactive_timeout          = 300
+connect_timeout              = 30
+net_read_timeout             = 300
+net_write_timeout            = 300
+innodb_lock_wait_timeout     = 60
+
+# --- InnoDB ---------------------------------------------------------
+default_storage_engine       = InnoDB
+innodb_buffer_pool_size      = 256M
+innodb_buffer_pool_instances = 1
+innodb_log_file_size         = 64M
+# Full ACID: a host crash must not lose a confirmed write. See my.cnf.
+innodb_flush_log_at_trx_commit = 1
+innodb_flush_method          = O_DIRECT
+innodb_file_per_table        = 1
+innodb_stats_on_metadata     = 0
+innodb_io_capacity           = 200
+innodb_read_io_threads       = 2
+innodb_write_io_threads      = 2
+
+# --- Temp tables / sorting ------------------------------------------
+tmp_table_size               = 32M
+max_heap_table_size          = 32M
+join_buffer_size             = 2M
+sort_buffer_size             = 2M
+
+# --- Table cache ----------------------------------------------------
+table_open_cache             = 2000
+
+# --- Slow query log (off by default; see my.cnf for the caveats) ----
+slow_query_log               = 0
+long_query_time              = 2
+
+[client]
+default-character-set        = utf8mb4

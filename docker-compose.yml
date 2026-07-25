@@ -1,12 +1,19 @@
 name: ${STACK_NAME:-wordpress}
 
 # Shared logging policy: cap container logs so disk never fills up.
-# max-size 10m + max-file 1 => at most ~10 MB of logs per container.
+# max-size 10m + max-file 3 => at most ~30 MB of logs per container.
+#
+# Don't drop this to max-file 1: with a single file the driver discards the
+# whole log at the rotation boundary, so a busy site can have no history at
+# all by the time anyone looks. PHP errors, Apache errors and msmtp's mail
+# log all land here, and every troubleshooting path in the docs starts with
+# `docker compose logs` — 30 MB is the cheapest insurance in this file. If
+# disk is genuinely tight, ship logs off-host rather than shortening them.
 x-logging: &default-logging
   driver: json-file
   options:
     max-size: "10m"
-    max-file: "1"
+    max-file: "3"
 
 # DB/WordPress env shared by the web container and the wp-cron sidecar.
 # wp-cli in the sidecar reads these to connect to the same database.
@@ -16,6 +23,12 @@ x-wp-db-env: &wp-db-env
   WORDPRESS_DB_USER: ${MYSQL_USER}
   WORDPRESS_DB_PASSWORD: ${MYSQL_PASSWORD}
   WORDPRESS_TABLE_PREFIX: ${WORDPRESS_TABLE_PREFIX}
+
+# Marks a container as eligible for restart by the opt-in autoheal service
+# (see the `autoheal` service at the bottom). Scoping by label means
+# autoheal only ever touches this stack, never a neighbour's containers.
+x-autoheal-label: &autoheal-label
+  autoheal: "true"
 
 # SMTP relay for plugin-free outgoing mail (msmtp shim, see mail/wp-sendmail.sh).
 # Needed by BOTH the web container and wp-cron (WooCommerce/notification
@@ -34,6 +47,7 @@ services:
   db:
     image: mariadb:11.4
     container_name: ${STACK_NAME:-wordpress}_db
+    labels: *autoheal-label
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
@@ -58,6 +72,7 @@ services:
       resources:
         limits:
           memory: ${DB_MEM_LIMIT:-2g}
+          cpus: "${DB_CPU_LIMIT:-2}"
         reservations:
           memory: ${DB_MEM_RESERVATION:-512m}
     networks:
@@ -66,14 +81,26 @@ services:
   redis:
     image: redis:7.4-alpine
     container_name: ${STACK_NAME:-wordpress}_redis
+    labels: *autoheal-label
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
     logging: *default-logging
+    # Pure cache, no persistence: both RDB (--save "") and AOF
+    # (--appendonly no) are OFF.
+    #
+    # Why: with allkeys-lru the data here is disposable by definition — WP
+    # regenerates any evicted key from the database. Persisting it bought
+    # nothing but constant disk writes, unbounded growth of the redis_data
+    # volume, and AOF rewrites that transiently double memory use (which is
+    # exactly what pushes the container into its own memory limit).
+    # The only cost is a cold cache after a restart; it warms in minutes.
     command:
       - redis-server
+      - --save
+      - ""
       - --appendonly
-      - "yes"
+      - "no"
       - --requirepass
       - ${REDIS_PASSWORD}
       - --maxmemory
@@ -81,6 +108,8 @@ services:
       - --maxmemory-policy
       - allkeys-lru
     volumes:
+      # Kept mounted so re-enabling persistence needs no volume surgery,
+      # but nothing is written to it in the configuration above.
       - redis_data:/data
     healthcheck:
       test: [ "CMD-SHELL", "[ \"$$(redis-cli --raw -a \"${REDIS_PASSWORD}\" ping 2>/dev/null)\" = \"PONG\" ]" ]
@@ -92,6 +121,7 @@ services:
       resources:
         limits:
           memory: ${REDIS_MEM_LIMIT:-640m}
+          cpus: "${REDIS_CPU_LIMIT:-1}"
         reservations:
           memory: ${REDIS_MEM_RESERVATION:-128m}
     networks:
@@ -103,6 +133,7 @@ services:
       dockerfile: Dockerfile
     image: ${STACK_NAME:-wordpress}-wp:local
     container_name: ${STACK_NAME:-wordpress}_wordpress
+    labels: *autoheal-label
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
@@ -115,7 +146,7 @@ services:
     environment:
       <<: [*wp-db-env, *smtp-env]
       WORDPRESS_DEBUG: ${WORDPRESS_DEBUG}
-      # Trusted proxy CIDRs for Apache mod_remoteip (apache/migration.conf).
+      # Trusted proxy CIDRs for Apache mod_remoteip (apache/hardening.conf).
       # Default trusts private ranges; narrow to your edge proxy's subnet.
       TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-10.0.0.0/8 172.16.0.0/12 192.168.0.0/16}
       WORDPRESS_CONFIG_EXTRA: |
@@ -124,7 +155,7 @@ services:
         define('WP_SITEURL', '${WP_SITEURL}');
 
         /* Real client IP is handled by Apache mod_remoteip (see
-           apache/migration.conf + TRUSTED_PROXY_CIDRS): it trusts
+           apache/hardening.conf + TRUSTED_PROXY_CIDRS): it trusts
            X-Forwarded-For ONLY from your edge proxy, which is safer than
            trusting it in PHP unconditionally. Here we only map
            X-Forwarded-Proto to HTTPS so WordPress builds https:// URLs
@@ -170,8 +201,15 @@ services:
         define('DISALLOW_FILE_MODS', ${DISALLOW_FILE_MODS:-false});
         define('FORCE_SSL_ADMIN', true);
 
-        /* Debug logging (controlled by WORDPRESS_DEBUG env) */
-        define('WP_DEBUG_LOG', WP_DEBUG);
+        /* Debug logging (controlled by WORDPRESS_DEBUG env).
+           Errors go to the CONTAINER LOG, not to a file: php.ini sets
+           error_log = /dev/stderr, so `docker compose logs wordpress`
+           shows them. WP_DEBUG_LOG is deliberately false because it
+           writes wp-content/debug.log — a path INSIDE the docroot, i.e.
+           downloadable over HTTP, exposing paths, SQL and sometimes
+           tokens. apache/hardening.conf also denies that filename, so
+           re-enabling this is defended in depth rather than fatal. */
+        define('WP_DEBUG_LOG', false);
         define('WP_DEBUG_DISPLAY', false);
     ports:
       # Behind a domain proxy (NPM/Caddy) the site is reached over the
@@ -183,7 +221,11 @@ services:
     volumes:
       - wp_data:/var/www/html
       - ./php/php.ini:/usr/local/etc/php/conf.d/zz-wordpress.ini:ro
-      - ./apache/migration.conf:/etc/apache2/conf-enabled/zz-migration.conf:ro
+      # Always-on hardened Apache profile. The wide-open limits needed to
+      # import a multi-GB migration package live in
+      # apache/migration.conf.example and are mounted temporarily via
+      # docker-compose.override.yml — see MIGRATION.md.
+      - ./apache/hardening.conf:/etc/apache2/conf-enabled/zz-hardening.conf:ro
     healthcheck:
       # No curl/wget in the image, so probe port 80 with PHP (always present).
       test: [ "CMD", "php", "-r", "exit(@fsockopen('localhost', 80, $$e, $$s, 2) ? 0 : 1);" ]
@@ -195,6 +237,10 @@ services:
       resources:
         limits:
           memory: ${WP_MEM_LIMIT:-2g}
+          # Bound CPU too, not just memory: on a host running several sites
+          # one runaway import or plugin loop would otherwise saturate every
+          # core and make the neighbours unresponsive.
+          cpus: "${WP_CPU_LIMIT:-2}"
         reservations:
           memory: ${WP_MEM_RESERVATION:-512m}
     networks:
@@ -210,6 +256,7 @@ services:
       dockerfile: Dockerfile
     image: ${STACK_NAME:-wordpress}-wp:local
     container_name: ${STACK_NAME:-wordpress}_wpcron
+    labels: *autoheal-label
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
@@ -220,6 +267,10 @@ services:
         condition: service_healthy
     environment:
       <<: [*wp-db-env, *smtp-env]
+      # Set false to manage the Redis object cache drop-in by hand.
+      WP_AUTO_ENABLE_REDIS: ${WP_AUTO_ENABLE_REDIS:-true}
+      # Hard ceiling for a single cron run, in seconds (see loop below).
+      WP_CRON_TIMEOUT: ${WP_CRON_TIMEOUT:-300}
     working_dir: /var/www/html
     volumes:
       - wp_data:/var/www/html
@@ -228,15 +279,43 @@ services:
     command:
       - |
         echo "[wp-cron] starting cron loop"
+
+        # The wp-config.php written by this stack defines WP_REDIS_* and
+        # WP_CACHE, but none of that does anything until the object-cache.php
+        # drop-in exists — which normally means remembering to install and
+        # activate a plugin by hand after every deploy. Do it here instead,
+        # idempotently: once the drop-in is in place this is a single stat().
+        ensure_redis_cache() {
+          [ "$${WP_AUTO_ENABLE_REDIS}" = "true" ] || return 0
+          [ -f /var/www/html/wp-content/object-cache.php ] && return 0
+          echo "[wp-cron] installing/enabling Redis object cache drop-in"
+          wp plugin is-installed redis-cache >/dev/null 2>&1 \
+            || wp plugin install redis-cache --activate || return 1
+          wp plugin is-active redis-cache >/dev/null 2>&1 \
+            || wp plugin activate redis-cache || return 1
+          wp redis enable || return 1
+          echo "[wp-cron] Redis object cache enabled"
+        }
+
         while true; do
           if wp core is-installed --quiet 2>/dev/null; then
+            ensure_redis_cache || echo "[wp-cron] WARNING: could not enable Redis object cache"
             # Don't hide failures: capture output + exit code, log on error,
             # and stamp a success file so the healthcheck can see cron is alive.
-            if out="$$(wp cron event run --due-now 2>&1)"; then
+            #
+            # timeout matters: a wp-cli process wedged on a lock or an
+            # unreachable external API would otherwise block this loop
+            # forever. The loop is serial, so one hang = cron stops for good,
+            # and the only symptom is the healthcheck going red 5 min later.
+            if out="$$(timeout "$${WP_CRON_TIMEOUT}" wp cron event run --due-now 2>&1)"; then
               date +%s > /tmp/wp-cron-last-success
             else
               rc=$$?
-              echo "[wp-cron] cron run FAILED (exit $$rc): $$out"
+              if [ "$$rc" = "124" ]; then
+                echo "[wp-cron] cron run TIMED OUT after $${WP_CRON_TIMEOUT}s: $$out"
+              else
+                echo "[wp-cron] cron run FAILED (exit $$rc): $$out"
+              fi
             fi
           else
             echo "[wp-cron] WordPress not installed yet; waiting"
@@ -255,6 +334,7 @@ services:
       resources:
         limits:
           memory: ${WPCRON_MEM_LIMIT:-256m}
+          cpus: "${WPCRON_CPU_LIMIT:-1}"
     networks:
       - internal
 
@@ -272,6 +352,7 @@ services:
       dockerfile: Dockerfile
     image: ${STACK_NAME:-wordpress}-backup:local
     container_name: ${STACK_NAME:-wordpress}_backup
+    labels: *autoheal-label
     restart: unless-stopped
     logging: *default-logging
     depends_on:
@@ -304,6 +385,15 @@ services:
       RCLONE_CONFIG_S3_ENDPOINT: ${S3_ENDPOINT}
       RCLONE_CONFIG_S3_REGION: ${S3_REGION:-}
       RCLONE_CONFIG_S3_ACL: private
+      # Client-side encryption (rclone crypt). Set a long passphrase and a
+      # bucket compromise stops being a customer-data breach: dumps contain
+      # names, addresses, phone numbers and order history. Store the
+      # passphrase in a password manager — it is NOT saved anywhere here,
+      # and without it the backups cannot be restored.
+      BACKUP_ENCRYPT_PASSWORD: ${BACKUP_ENCRYPT_PASSWORD:-}
+      # Table prefix is used by `restore.sh --verify` to confirm a dump
+      # really contains this site's schema.
+      WORDPRESS_TABLE_PREFIX: ${WORDPRESS_TABLE_PREFIX}
       # Observability: optional dead-man's-switch ping (Healthchecks.io etc.)
       # — backup.sh pings it on success, entrypoint.sh pings <URL>/fail on
       # failure. Leave empty to disable. BACKUP_MAX_AGE_HOURS drives the
@@ -314,6 +404,13 @@ services:
       - wp_data:/var/www/html:ro   # read-only, only for the files backup
     security_opt:
       - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          memory: ${BACKUP_MEM_LIMIT:-512m}
+          # gzip -9 on a big dump is CPU-hungry and runs at night; cap it so
+          # a backup never competes with the site for every core.
+          cpus: "${BACKUP_CPU_LIMIT:-1}"
     healthcheck:
       # Unhealthy if no successful backup within BACKUP_MAX_AGE_HOURS.
       # start_period is long so a fresh container (whose first scheduled run
@@ -325,6 +422,43 @@ services:
       start_period: 25h
     networks:
       - internal
+
+  # Restart containers that go unhealthy. OPT-IN: `--profile autoheal`.
+  #
+  # Why this is needed: Docker's `restart: unless-stopped` reacts to a
+  # container EXITING, not to it failing its healthcheck. Without something
+  # like this, the carefully-written healthchecks above (cron stalled,
+  # backup stale) are indicators that nobody acts on — a wedged wp-cron
+  # would sit red indefinitely.
+  #
+  # TRADE-OFF, read before enabling: this needs the Docker socket, and
+  # write access to /var/run/docker.sock is equivalent to root on the host.
+  # It is a reasonable trade on a single-tenant server you already control;
+  # it is NOT something to enable on a shared host. The alternative is to
+  # have external monitoring watch `docker ps` health and page a human.
+  # Only containers labelled autoheal=true (this stack's) are touched.
+  autoheal:
+    profiles: [ "autoheal" ]
+    image: willfarrell/autoheal:1.2.0
+    container_name: ${STACK_NAME:-wordpress}_autoheal
+    restart: unless-stopped
+    logging: *default-logging
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      TZ: ${TZ}
+      AUTOHEAL_CONTAINER_LABEL: autoheal
+      AUTOHEAL_INTERVAL: ${AUTOHEAL_INTERVAL:-30}
+      # Grace period after a container starts before it may be restarted.
+      AUTOHEAL_START_PERIOD: ${AUTOHEAL_START_PERIOD:-300}
+      DOCKER_SOCK: /var/run/docker.sock
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    deploy:
+      resources:
+        limits:
+          memory: 64m
+          cpus: "0.5"
 
 volumes:
   db_data:

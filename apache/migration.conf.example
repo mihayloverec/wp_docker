@@ -1,23 +1,46 @@
 # =====================================================================
-#  Apache overrides — mounted into conf-enabled (loaded last).
-#  Lets long migration uploads/extractions run without being cut off.
+#  Apache: TEMPORARY migration profile — NOT mounted by default.
+#
+#  Importing a Duplicator / WPvivid package means uploading a multi-GB
+#  archive through the browser and then extracting it, which needs limits
+#  that are genuinely unsafe to run permanently:
+#    - LimitRequestBody 0  : no cap on request size at all
+#    - body=0              : no timeout on a slow request body
+#  Together those let one client hold a connection open forever while
+#  streaming unlimited data — trivial slowloris, trivial disk-fill. That
+#  is an acceptable trade for one afternoon of migration; it is not an
+#  acceptable production default, which is why this is a separate file
+#  instead of the always-mounted one it used to be.
+#
+#  Everything else (trusted proxy, keep-alive, file-exposure rules) stays
+#  in apache/hardening.conf — this file only widens the limits.
+#
+#  ---------------------------------------------------------------------
+#  HOW TO USE (see MIGRATION.md for the full procedure)
+#
+#  1) Copy it into place:
+#       cp apache/migration.conf.example apache/migration.conf
+#
+#  2) Add the mounts to docker-compose.override.yml (git-ignored):
+#       services:
+#         wordpress:
+#           volumes:
+#             - ./apache/migration.conf:/etc/apache2/conf-enabled/zzz-migration.conf:ro
+#             - ./php/php.ini.migration.example:/usr/local/etc/php/conf.d/zzz-migration.ini:ro
+#
+#     The zzz- prefix makes these load AFTER zz-hardening.conf /
+#     zz-wordpress.ini, so they win while the override is in place.
+#
+#  3) docker compose up -d wordpress
+#
+#  4) WHEN THE MIGRATION IS DONE, remove the override and restart:
+#       rm docker-compose.override.yml apache/migration.conf
+#       docker compose up -d --force-recreate wordpress
+#
+#     Confirm you are back on the hardened profile (should NOT be 0):
+#       docker compose exec wordpress apachectl -t -D DUMP_RUN_CFG \
+#         | grep -i limitrequestbody
 # =====================================================================
-
-# Suppress the "could not reliably determine the server's FQDN" warning.
-ServerName localhost
-
-# --- Real client IP behind a trusted reverse proxy ------------------
-# mod_remoteip rewrites REMOTE_ADDR to the real client IP from
-# X-Forwarded-For, but ONLY when the request actually comes from a trusted
-# proxy — so other containers on the shared proxy network can't spoof it.
-# TRUSTED_PROXY_CIDRS is injected from the environment (docker-compose.yml
-# / .env); Apache expands ${VAR} from the process environment at startup.
-# For best security narrow it to your edge proxy's exact subnet; the
-# default trusts private ranges (the proxy is always a private container).
-<IfModule mod_remoteip.c>
-    RemoteIPHeader X-Forwarded-For
-    RemoteIPTrustedProxy ${TRUSTED_PROXY_CIDRS}
-</IfModule>
 
 # Max time Apache waits on a slow request/response (extraction, import).
 Timeout 900
@@ -31,8 +54,3 @@ LimitRequestBody 0
 <IfModule mod_reqtimeout.c>
     RequestReadTimeout header=20-40,MinRate=500 body=0
 </IfModule>
-
-# Keep-alive helps the many small asset requests Elementor pages make.
-KeepAlive On
-MaxKeepAliveRequests 200
-KeepAliveTimeout 5

@@ -45,10 +45,11 @@ RUN set -eux; \
     chmod +x /usr/local/bin/wp; \
     wp --info --allow-root
 
-# Enable mod_remoteip so Apache can derive the real client IP from
-# X-Forwarded-For, but ONLY when the request comes from a trusted proxy
-# (configured in apache/migration.conf via TRUSTED_PROXY_CIDRS).
-RUN a2enmod remoteip
+# mod_remoteip: derive the real client IP from X-Forwarded-For, but ONLY
+# when the request comes from a trusted proxy (configured in
+# apache/hardening.conf via TRUSTED_PROXY_CIDRS).
+# mod_headers: security response headers, also set in hardening.conf.
+RUN a2enmod remoteip headers
 
 # Plugin-free outgoing mail: PHP's sendmail_path (php/php.ini) points at
 # this shim, which relays through msmtp using the SMTP_* env vars.

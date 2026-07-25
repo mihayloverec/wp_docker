@@ -1,0 +1,36 @@
+# Everything the image build does NOT need. Without this the whole repo —
+# including .git and 50+ KB of bilingual docs — is packed and sent to the
+# daemon on every build, and any secret in a stray .env would land in the
+# build context.
+#
+# Keep in mind: `docker build .` (the wordpress image) only needs the
+# Dockerfile and mail/, while the backup image builds from ./backup.
+
+.git
+.github
+.gitignore
+.dockerignore
+
+# Secrets and local state — must never enter a build context.
+.env
+.env.*
+!.env.example
+secrets/
+docker-compose.override.yml
+.verify/
+
+# Docs (not needed inside the image)
+*.md
+
+# Local tooling
+.claude/
+.hadolint.yaml
+
+# Runtime configs are bind-mounted at run time, not baked into the image.
+apache/
+mariadb/
+php/
+proxy-caddy/
+ci/
+verify.sh
+init.sh
