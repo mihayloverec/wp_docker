@@ -14,14 +14,23 @@ Treat them as secrets:
   before pushing: `git status --ignored` should list `.env`, never stage it.
 - Only `.env.example` (placeholders) belongs in the repo.
 - Each site gets its **own** strong, unique passwords — don't reuse across
-  sites. Generate with e.g. `openssl rand -base64 24`.
-- Restrict file perms on the server: `chmod 600 .env`.
+  sites. Let `./init.sh` **generate** them (`openssl rand -base64 24`) rather
+  than inventing them; `./verify.sh` rejects anything under 16 characters.
+- Restrict file perms on the server: `chmod 600 .env` (`init.sh` does this).
+- Set `BACKUP_ENCRYPT_PASSWORD` if you enable backups — dumps contain
+  customer personal data. Keep that passphrase in a password manager; it is
+  stored nowhere else and the backups are unrecoverable without it.
 - If a secret ever leaks (committed, pasted, shared): **rotate it** — change
   the DB/Redis passwords and revoke+reissue the S3 keys in the provider panel.
 - Give S3 keys the **least privilege** needed (write to the one backup
   bucket); don't use account-wide admin keys.
 - In Portainer, prefer the stack's **environment variables** / secrets over
   committing `.env` into a repo it pulls from.
+- Anyone who can read the Docker API (`docker inspect`, the Portainer UI, any
+  container with the socket mounted) can read environment variables in plain
+  text. To move the DB passwords out of the environment entirely, enable the
+  opt-in `docker-compose.secrets.yml` overlay — its header documents the setup
+  and, honestly, what it does not cover.
 
 ## What is included
 
@@ -42,9 +51,10 @@ Treat them as secrets:
 
 | File | What it controls | Heavy-site defaults |
 |------|------------------|---------------------|
-| `php/php.ini` | PHP memory, uploads, OPcache+JIT | `memory_limit 1024M`, uploads 2048M, `max_input_vars 10000`, OPcache 512M / 50k files |
+| `php/php.ini` | PHP memory, uploads, OPcache | `memory_limit 1024M`, uploads 512M, `max_input_vars 10000`, OPcache 512M / 50k files, JIT off |
 | `mariadb/my.cnf` | InnoDB buffer pool, packet size, timeouts | `innodb_buffer_pool_size 1G`, `max_allowed_packet 512M` |
-| `apache/migration.conf` | Apache timeouts / upload body limits | `Timeout 900`, `LimitRequestBody 0` |
+| `apache/hardening.conf` | Trusted proxy, request limits, file denials, headers | `LimitRequestBody 600M`, `Timeout 120` |
+| `apache/migration.conf.example` | **Temporary** import limits (not mounted) | `Timeout 900`, `LimitRequestBody 0` |
 | `Dockerfile` | extra PHP extensions + wp-cli | phpredis, soap, wp-cli |
 | `.env` | URLs, secrets, RAM limits per container | see `.env.example` |
 
@@ -153,16 +163,33 @@ Light sites, or ~6–7 Medium sites — always leave 1–2 GB for the host + NPM
 
 ## 1) Prepare environment variables
 
-1. Open `.env`
-2. Set strong values for:
-   - `MYSQL_PASSWORD`
-   - `MYSQL_ROOT_PASSWORD`
-   - `REDIS_PASSWORD`
-3. Confirm:
-   - `WP_HOME`
-   - `WP_SITEURL`
-   - `PROXY_NETWORK` (must match network used by your NPM container)
-   - `LETSENCRYPT_EMAIL` (use this in NPM SSL tab)
+Generate `.env` with strong secrets in one step:
+
+```bash
+./init.sh --stack mysite --domain mysite.org --port 8088
+```
+
+That writes `.env` (mode 600) with `MYSQL_PASSWORD`, `MYSQL_ROOT_PASSWORD`,
+`REDIS_PASSWORD` and `BACKUP_ENCRYPT_PASSWORD` generated, and fills in
+`WP_HOME` / `WP_SITEURL` / `SMTP_FROM` / `LETSENCRYPT_EMAIL` from the domain.
+**Copy the backup passphrase it prints into a password manager.**
+
+Then fill in by hand:
+
+- `PROXY_NETWORK` — must match the network used by your NPM container
+- `SMTP_*` — outgoing mail; an empty `SMTP_HOST` means mail is silently
+  dropped (see [MAIL.md](MAIL.md))
+- `S3_*` — only if you enable the `backup` profile
+
+Finally, validate before deploying:
+
+```bash
+./verify.sh
+```
+
+It catches placeholder and weak secrets, malformed URLs, host-port clashes
+with another site, SMTP misconfiguration, and a `innodb_buffer_pool_size`
+that doesn't fit `DB_MEM_LIMIT`.
 
 ## 2) Ensure proxy network exists
 
@@ -220,18 +247,29 @@ docker compose logs -f redis
 
 When WordPress opens in browser, complete initial setup wizard.
 
-## 7) Enable Redis object cache in WordPress
+## 7) Redis object cache — automatic
 
-After first login to admin panel:
+Nothing to do. The `wp-cron` sidecar installs and enables the **Redis Object
+Cache** drop-in on its first loop iteration after WordPress is installed.
+Without the drop-in the `WP_REDIS_*` constants in `wp-config.php` have no
+effect at all, so leaving this to a human step meant the cache was silently
+absent on any site where someone forgot.
 
-1. Install plugin **Redis Object Cache**
-2. Activate plugin
-3. In plugin page press **Enable Object Cache**
+Confirm it took:
 
-Connection settings come from `wp-config` constants automatically. Because
-the image ships the **PhpRedis** extension, the plugin uses the fast native
-client (Diagnostics should show `Client: PhpRedis`, `Status: Connected`),
-not the slower Predis fallback.
+```bash
+docker compose exec -u www-data wordpress wp redis status
+docker compose logs wp-cron | grep -i redis
+```
+
+Expect `Status: Connected` and `Client: PhpRedis` — the image ships the
+**PhpRedis** extension, so the fast native client is used rather than the
+slower Predis fallback.
+
+To manage the plugin yourself instead, set `WP_AUTO_ENABLE_REDIS=false` in
+`.env`, then install **Redis Object Cache** and press *Enable Object Cache*
+in wp-admin. Note the sidecar also needs `DISALLOW_FILE_MODS=false` (the
+default) to be able to install a plugin.
 
 ## 8) Site Health — getting a clean report
 
@@ -241,7 +279,7 @@ green. What's already handled and the few manual items:
 | Site Health item | Status | Notes |
 |------------------|--------|-------|
 | PHP version (8.3), required modules | ✅ | imagick, gd, intl, zip, exif, soap, redis all present |
-| Persistent object cache | ⚙️ manual | Enable Redis Object Cache plugin (step 7) |
+| Persistent object cache | ✅ | Drop-in installed + enabled automatically by the `wp-cron` sidecar (step 7) |
 | Scheduled events / WP-Cron | ✅ | Real cron via the `wp-cron` sidecar (pseudo-cron disabled) |
 | HTTPS status | ✅ | `X-Forwarded-Proto` from NPM is honored; set `WP_HOME/WP_SITEURL` to `https://` |
 | utf8mb4 / DB version | ✅ | MariaDB 11.4, utf8mb4 |

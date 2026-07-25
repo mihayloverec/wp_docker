@@ -81,10 +81,10 @@ terminates HTTPS for all sites.
 
 | Service     | Image / build                         | Role |
 |-------------|---------------------------------------|------|
-| `wordpress` | custom `Dockerfile` (Apache, PHP 8.3) | The site. Tuned via `php/php.ini` + `apache/migration.conf`. |
+| `wordpress` | custom `Dockerfile` (Apache, PHP 8.3) | The site. Tuned via `php/php.ini` + `apache/hardening.conf`. |
 | `wp-cron`   | same custom image                     | Sidecar running **real** WP-Cron every 60s via wp-cli (visitor pseudo-cron is disabled). |
 | `db`        | `mariadb:11.4`                        | Database, tuned via `mariadb/my.cnf`. |
-| `redis`     | `redis:7.4-alpine`                    | Persistent object cache (LRU eviction, password-protected). |
+| `redis`     | `redis:7.4-alpine`                    | Object cache (LRU eviction, password-protected, persistence off). |
 | `backup`    | custom `backup/Dockerfile`            | Daily DB (+ optional `wp-content`) backup to S3-compatible storage via rclone. |
 
 **Networks:** `internal` (private, per-stack — DB/Redis are never exposed) and
@@ -105,16 +105,29 @@ terminates HTTPS for all sites.
 - **Reverse-proxy HTTPS detection** baked into `wp-config` — honours
   `X-Forwarded-Proto`/`X-Forwarded-For` so WordPress generates correct `https://`
   URLs and sees the real client IP behind NPM/Caddy.
-- **Migration-ready limits** — 2 GB uploads, 900s timeouts, 512 MB DB packet, so
-  big Duplicator/WPvivid packages import without 504s or memory errors.
-- **Performance tuning** — OPcache + JIT (512 MB / 50k files), InnoDB buffer pool,
-  realpath cache, Redis object cache.
+- **Zero-touch object cache** — the sidecar installs and enables the Redis
+  Object Cache drop-in on first run, so the `WP_REDIS_*` settings in
+  `wp-config.php` actually take effect instead of waiting on a manual step.
+- **Migration profiles, opt-in** — the limits needed to import a multi-GB
+  Duplicator/WPvivid package (2 GB uploads, 900s timeouts, unlimited request
+  body) are mounted only while migrating, not left on a live site where they
+  are a slowloris and disk-fill vector. See [MIGRATION.md](MIGRATION.md).
+- **Performance tuning** — OPcache (512 MB / 50k files), InnoDB buffer pool,
+  realpath cache, Redis object cache with persistence disabled (it is a cache).
 - **Security hardening** — `DISALLOW_FILE_EDIT`, `FORCE_SSL_ADMIN`, optional
   `DISALLOW_FILE_MODS` to freeze a finished site, `expose_php = Off`, DB/Redis on
-  a private network.
-- **Operational safety** — per-service memory limits, capped JSON logging (logs
-  never fill the disk), healthchecks with dependency ordering, automated off-host
-  S3 backups with retention/rotation.
+  a private network, **no PHP execution in `wp-content/uploads`**, `xmlrpc.php`
+  denied, `debug.log`/`wp-config.php`/dotfiles unreachable over HTTP, security
+  response headers, and an opt-in overlay that keeps DB passwords out of
+  `docker inspect`.
+- **Backups you can trust** — every dump is verified (gzip integrity + the
+  dump-completion marker) before upload, rotation can never leave zero copies,
+  optional client-side encryption, and `restore.sh --verify` proves a backup is
+  restorable without touching the database.
+- **Operational safety** — per-service memory *and* CPU limits, capped JSON
+  logging, healthchecks with dependency ordering, a cron timeout so one wedged
+  job can't stall the loop, and an opt-in `autoheal` profile that actually
+  restarts unhealthy containers.
 - **Multi-tenant by design** — `STACK_NAME` namespaces everything; run dozens of
   sites on one box, each with its own profile.
 - **Plugin-free outgoing email** — `wp_mail()` relays through msmtp, configured
@@ -146,12 +159,12 @@ cd mysite
 # 2) Create the shared proxy network ONCE per server (any name; must match .env)
 docker network create web-proxy
 
-# 3) Configure
-cp .env.example .env
-nano .env          # set STACK_NAME, DOMAIN, WP_HOME/WP_SITEURL, all passwords,
-                   # WORDPRESS_LOCAL_PORT (unique), PROXY_NETWORK=web-proxy
+# 3) Configure — init.sh writes .env and GENERATES the secrets for you
+./init.sh --stack mysite --domain mysite.org --port 8088
+nano .env          # fill in SMTP_* (mail) and S3_* (backups) by hand
 
-# 4) Preflight: catch placeholder secrets, bad values, missing proxy network
+# 4) Preflight: catch placeholder secrets, weak passwords, port clashes,
+#    SMTP mistakes, buffer-pool/memory mismatches, missing proxy network
 ./verify.sh
 
 # 5) Build + start (first build takes a few minutes)
@@ -163,10 +176,15 @@ docker compose logs -f wordpress
 ```
 
 Then point the domain at the box, register it in your edge proxy
-(→ forward to `<STACK_NAME>_wordpress:80`), open the site, finish the WordPress
-install wizard, and enable the **Redis Object Cache** plugin. Full step-by-step
-(including Portainer and NPM screenshots-worth of detail) is in
-**[DEPLOY.md](DEPLOY.md)**.
+(→ forward to `<STACK_NAME>_wordpress:80`), open the site and finish the
+WordPress install wizard. The **Redis Object Cache** drop-in is installed and
+enabled automatically by the `wp-cron` sidecar (set `WP_AUTO_ENABLE_REDIS=false`
+to do it yourself). Full step-by-step is in **[DEPLOY.md](DEPLOY.md)**.
+
+> Prefer to write `.env` by hand? `cp .env.example .env` still works — but
+> generate the passwords rather than inventing them:
+> `openssl rand -base64 24`. `./verify.sh` now rejects anything shorter than
+> 16 characters, and any leftover `example.com`.
 
 <a name="configuration-reference-env"></a>
 ## Configuration reference (`.env`)
@@ -248,9 +266,10 @@ site's folder to match your chosen profile.
 
 | File | Controls | Heavy defaults |
 |------|----------|----------------|
-| [`php/php.ini`](php/php.ini) | PHP memory, uploads, OPcache + JIT | `memory_limit 1024M`, uploads 2048M, `max_input_vars 10000`, OPcache 512M / 50k files, JIT 128M |
+| [`php/php.ini`](php/php.ini) | PHP memory, uploads, OPcache | `memory_limit 1024M`, uploads 512M, `max_input_vars 10000`, OPcache 512M / 50k files, JIT off |
 | [`mariadb/my.cnf`](mariadb/my.cnf) | InnoDB buffer pool, packet size, timeouts | `innodb_buffer_pool_size 1G`, `max_allowed_packet 512M`, utf8mb4 |
-| [`apache/migration.conf`](apache/migration.conf) | Apache timeouts / upload body limits | `Timeout 900`, `LimitRequestBody 0`, keep-alive |
+| [`apache/hardening.conf`](apache/hardening.conf) | Trusted proxy, request limits, file denials, headers | `LimitRequestBody 600M`, `Timeout 120`, no PHP in uploads, xmlrpc denied |
+| [`apache/migration.conf.example`](apache/migration.conf.example) | **Temporary** import limits (not mounted) | `Timeout 900`, `LimitRequestBody 0` |
 | [`Dockerfile`](Dockerfile) | Extra PHP extensions + wp-cli | phpredis, soap, wp-cli |
 
 `php/php.ini` ships as the **Heavy** profile. For smaller sites, copy a ready-made
@@ -317,18 +336,28 @@ copy one over `php/php.ini` instead of editing by hand:
 | `memory_limit` | `256M` | `512M` | `1024M` |
 | `opcache.memory_consumption` | `128` | `256` | `512` |
 | `opcache.max_accelerated_files` | `20000` | `30000` | `50000` |
-| `opcache.jit_buffer_size` | `off` | `64M` | `128M` |
+| `opcache.jit` | `off` | `off` | `off` |
 
-**Part B — file edits** (`mariadb/my.cnf`):
+**Part C — file edits** (`mariadb/my.cnf`) — same idea, the columns match the
+bundled `mariadb/my.cnf.light.example` / `mariadb/my.cnf.medium.example`:
 
 | Setting | Light | Medium | Heavy |
 |---------|:---:|:---:|:---:|
 | `innodb_buffer_pool_size` | `256M` | `512M` | `1G` |
 | `innodb_buffer_pool_instances` | `1` | `1` | `2` |
 
-> Keep `WP_MEMORY_LIMIT ≤ php.ini memory_limit`, and `REDIS_MAXMEMORY` a bit below
-> `REDIS_MEM_LIMIT`. **Server example:** a 16 GB box comfortably runs ~1 Heavy +
-> 3–4 Light, or ~6–7 Medium — always leave 1–2 GB for the host + proxy.
+```bash
+cp mariadb/my.cnf.light.example  mariadb/my.cnf   # small site
+cp mariadb/my.cnf.medium.example mariadb/my.cnf   # light WooCommerce
+docker compose up -d db                           # apply
+```
+
+> Keep `WP_MEMORY_LIMIT ≤ php.ini memory_limit`, `REDIS_MAXMEMORY` a bit below
+> `REDIS_MEM_LIMIT`, and `innodb_buffer_pool_size` well under `DB_MEM_LIMIT` —
+> a pool that doesn't fit gets the DB OOM-killed rather than merely slowed.
+> `./verify.sh` checks all three. **Server example:** a 16 GB box comfortably
+> runs ~1 Heavy + 3–4 Light, or ~6–7 Medium — always leave 1–2 GB for the host
+> + proxy.
 
 <a name="reverse-proxy"></a>
 ## Reverse proxy: NPM or Caddy
@@ -441,6 +470,37 @@ docker compose down                 # stop (volumes are kept)
 > `docker compose down -v` **deletes the volumes** (site files, database, cache).
 > Don't run it unless you mean to wipe the site.
 
+### Upgrading (WordPress, PHP, MariaDB)
+
+The image pins an exact WordPress/PHP version, so an upgrade happens when you
+rebuild — which means a rebuild can be a major version jump. Take a database
+snapshot first; the backup service is opt-in and may be off:
+
+```bash
+docker compose --profile backup run --rm \
+  --entrypoint /usr/local/bin/backup.sh backup      # verified dump to S3
+docker compose pull && docker compose up -d --build
+docker compose exec -u www-data wordpress wp core version
+```
+
+If it goes wrong, `restore.sh --db latest --yes` puts the database back (and
+snapshots the current state first).
+
+### Acting on unhealthy containers
+
+Docker's `restart:` policy reacts to a container **exiting**, not to it failing
+a healthcheck — so a wedged `wp-cron` or a stale `backup` shows red and nothing
+happens. Enable the opt-in `autoheal` profile to restart them:
+
+```bash
+# in .env
+COMPOSE_PROFILES=backup,autoheal
+```
+
+It needs the Docker socket, and socket write access is equivalent to root on
+the host — fine on a single-tenant server you own, not on a shared one. The
+alternative is external monitoring watching container health.
+
 <a name="troubleshooting"></a>
 ## Troubleshooting
 
@@ -451,46 +511,103 @@ docker compose down                 # stop (volumes are kept)
 | Upload stops / 504 during import | Proxy or PHP timeout | Use `docker cp` (see MIGRATION.md); raise the proxy's read timeout. |
 | "Allowed memory exhausted" | Big serialized Elementor/Woo data | Raise `WP_MAX_MEMORY_LIMIT` + `php.ini memory_limit`. |
 | Redis shows "Predis", not "PhpRedis" | Drop-in not using native client | The image ships phpredis — re-enable the Redis Object Cache plugin / flush. |
+| Object cache never turns on | Sidecar couldn't install the drop-in | `docker compose logs wp-cron`; needs `WP_AUTO_ENABLE_REDIS=true` and `DISALLOW_FILE_MODS=false`. |
+| Mail silently not arriving | `SMTP_HOST` empty | Look for `message DROPPED` in `docker compose logs wordpress`; see [MAIL.md](MAIL.md). |
+| Relay rejects the sender | `SMTP_FROM` not authorised at the relay | Use an address the provider has verified — it is the envelope sender. |
+| Upload rejected at ~600 MB | Apache `LimitRequestBody` in the hardened profile | Expected. Mount the migration profile temporarily — [MIGRATION.md](MIGRATION.md). |
+| DB container OOM-killed | `innodb_buffer_pool_size` > `DB_MEM_LIMIT` | Run `./verify.sh`; use a lighter `my.cnf` profile or raise the limit. |
 | "Loopback request failed" in Site Health | Hairpin NAT behind the proxy | Cosmetic here (cron runs via the sidecar); optional `extra_hosts` fix in DEPLOY.md §8. |
 | Port already in use on start | `WORDPRESS_LOCAL_PORT` clashes | Give each stack a unique host port. |
 
 <a name="security"></a>
 ## Security checklist
 
+**Secrets**
+
 - **Never commit a real `.env`.** Only `*.env.example` placeholders belong in git.
   Verify with `git status` before pushing.
-- Use **strong, unique** secrets per site (`openssl rand -base64 24`); never reuse
-  passwords across sites.
-- `chmod 600 .env` on the server.
+- Let `./init.sh` **generate** the secrets; `./verify.sh` rejects anything under
+  16 characters and any leftover placeholder. Never reuse passwords across sites.
+- `chmod 600 .env` on the server (`init.sh` does this for you).
+- To keep DB passwords out of `docker inspect` and the Portainer UI, enable the
+  [`docker-compose.secrets.yml`](docker-compose.secrets.yml) overlay. Its header
+  documents exactly what it does and does not cover.
 - **If a secret leaks** (committed, pasted, shared): rotate it — change DB/Redis
   passwords, revoke+reissue S3 keys in the provider panel.
-- Give S3 keys **least privilege** (write to the one backup bucket only) — never
-  account-wide admin keys.
+
+**Backups** (details in [BACKUP.md](BACKUP.md))
+
+- Set `BACKUP_ENCRYPT_PASSWORD`. Dumps contain customer names, addresses, phone
+  numbers and order history; unencrypted in a bucket that is a data breach.
+  Store the passphrase elsewhere — it is the only copy.
+- Give S3 keys **least privilege** (this one bucket only) — never account-wide
+  admin keys.
+- Enable bucket **versioning + object lock**. Rotation needs delete permission,
+  so the keys in the container can also erase every backup you have; versioning
+  is what survives a compromised host.
+- Run `restore.sh --verify` on a schedule. An untested backup is a guess.
+
+**Network & runtime**
+
 - DB and Redis stay on the **private** `internal` network — never published.
 - The host port is bound to `127.0.0.1` unless you explicitly set `WP_HTTP_BIND`.
+- Narrow `TRUSTED_PROXY_CIDRS` to your edge proxy's subnet. It controls who is
+  allowed to set the client IP via `X-Forwarded-For`; the default trusts all
+  private ranges, which includes every other container on the proxy network.
+- [`apache/hardening.conf`](apache/hardening.conf) blocks PHP execution in
+  `wp-content/uploads`, denies `xmlrpc.php`, `debug.log`, `wp-config.php`,
+  `readme.html` and dotfiles, disables directory listings, and sets
+  `X-Content-Type-Options` / `X-Frame-Options` / `Referrer-Policy`.
+  **Uncomment the `xmlrpc.php` block** if you use the WordPress mobile app or
+  Jetpack.
+- Keep the **migration profiles unmounted** in production. `LimitRequestBody 0`
+  plus a disabled body timeout lets one client hold a connection open forever
+  while streaming unlimited data. Check with:
+  `docker compose exec wordpress apachectl -t -D DUMP_RUN_CFG | grep -i limitrequestbody`
+- Debug output goes to the **container log**, never to `wp-content/debug.log`
+  (that path is inside the docroot and downloadable).
 
 <a name="project-layout"></a>
 ## Project layout
 
 ```
 .
-├── docker-compose.yml      # the stack: wordpress, wp-cron, db, redis, backup
-├── Dockerfile              # custom WP image: phpredis + soap + wp-cli
-├── .env.example            # configuration template (copy → .env)
-├── verify.sh               # preflight: validate .env before deploy
-├── php/php.ini             # PHP tuning (memory, uploads, OPcache+JIT)
-├── mariadb/my.cnf          # MariaDB/InnoDB tuning
-├── apache/migration.conf   # Apache timeouts / upload limits / trusted proxy
-├── mail/wp-sendmail.sh     # plugin-free SMTP shim (msmtp) for outgoing mail
-├── backup/                 # S3 backup service (Dockerfile, backup.sh, entrypoint.sh, healthcheck.sh)
-├── proxy-caddy/            # optional Caddy edge proxy (when there's no NPM)
-├── ci/                     # CI helper scripts (env-var completeness check)
-├── .github/workflows/      # CI: lint, compose validate, build + Trivy scan
-├── README.md               # ← you are here
-├── DEPLOY.md               # full deployment guide (Portainer + NPM)
-├── BACKUP.md               # backup & restore procedures
-├── MIGRATION.md            # migrating an existing site into this stack
-└── MAIL.md                 # plugin-free outgoing email via SMTP
+├── docker-compose.yml           # the stack: wordpress, wp-cron, db, redis, backup, autoheal
+├── docker-compose.secrets.yml   # OPT-IN overlay: passwords from files, not env
+├── Dockerfile                   # custom WP image: phpredis + soap + wp-cli + msmtp
+├── .env.example                 # configuration template (copy → .env)
+├── .dockerignore                # keeps .git/docs/secrets out of the build context
+├── init.sh                      # create .env with GENERATED strong secrets
+├── verify.sh                    # preflight: validate .env before deploy
+├── php/
+│   ├── php.ini                  # PHP tuning, HEAVY profile (mounted)
+│   ├── php.ini.light.example    # small blog / brochure
+│   ├── php.ini.medium.example   # corporate site / light WooCommerce
+│   └── php.ini.migration.example # TEMPORARY: multi-GB import limits
+├── mariadb/
+│   ├── my.cnf                   # MariaDB/InnoDB tuning, HEAVY profile (mounted)
+│   ├── my.cnf.light.example     # small site
+│   └── my.cnf.medium.example    # light WooCommerce
+├── apache/
+│   ├── hardening.conf           # always mounted: trusted proxy, limits, file denials
+│   └── migration.conf.example   # TEMPORARY: unlimited body / long timeouts
+├── mail/wp-sendmail.sh          # plugin-free SMTP shim (msmtp) for outgoing mail
+├── backup/                      # S3 backup service
+│   ├── backup.sh                # dump → verify → upload → rotate
+│   ├── restore.sh               # --list / --verify / --db / --fetch-files
+│   ├── lib.sh                   # shared remote + secret-file handling
+│   ├── entrypoint.sh            # daily scheduler
+│   └── healthcheck.sh           # unhealthy if no recent SUCCESSFUL backup
+├── proxy-caddy/                 # optional Caddy edge proxy (when there's no NPM)
+├── ci/
+│   ├── check-env-vars.sh        # .env.example documents every required var
+│   └── test-verify.sh           # tests for verify.sh itself
+├── .github/workflows/           # CI: lint, validate, smoke-boot the stack, Trivy
+├── README.md                    # ← you are here
+├── DEPLOY.md                    # full deployment guide (Portainer + NPM)
+├── BACKUP.md                    # backup, encryption & restore procedures
+├── MIGRATION.md                 # migrating an existing site into this stack
+└── MAIL.md                      # plugin-free outgoing email via SMTP
 ```
 
 <a name="further-reading"></a>
@@ -498,8 +615,10 @@ docker compose down                 # stop (volumes are kept)
 
 - **[DEPLOY.md](DEPLOY.md)** — full deployment guide: secrets, Portainer Git-stack,
   NPM proxy host, DNS, first-start checks, Redis enablement, Site Health.
-- **[BACKUP.md](BACKUP.md)** — configure, run, list, restore, and verify backups.
-- **[MIGRATION.md](MIGRATION.md)** — import a Duplicator/WPvivid site cleanly.
+- **[BACKUP.md](BACKUP.md)** — configure, encrypt, run, list, restore, and
+  verify backups (including `restore.sh --verify`).
+- **[MIGRATION.md](MIGRATION.md)** — import a Duplicator/WPvivid site cleanly,
+  with the temporary migration profiles.
 - **[MAIL.md](MAIL.md)** — plugin-free outgoing email via SMTP (msmtp).
 - **[proxy-caddy/README.md](proxy-caddy/README.md)** — Caddy edge proxy setup.
 
@@ -578,10 +697,10 @@ HTTPS для всех сайтов.
 
 | Сервис      | Образ / сборка                        | Роль |
 |-------------|---------------------------------------|------|
-| `wordpress` | свой `Dockerfile` (Apache, PHP 8.3)   | Сам сайт. Тюнинг через `php/php.ini` + `apache/migration.conf`. |
+| `wordpress` | свой `Dockerfile` (Apache, PHP 8.3)   | Сам сайт. Тюнинг через `php/php.ini` + `apache/hardening.conf`. |
 | `wp-cron`   | тот же образ                          | Сайдкар, запускающий **настоящий** WP-Cron каждые 60 сек через wp-cli (псевдо-крон по визитам отключён). |
 | `db`        | `mariadb:11.4`                        | База данных, тюнинг через `mariadb/my.cnf`. |
-| `redis`     | `redis:7.4-alpine`                    | Постоянный объектный кэш (вытеснение LRU, пароль). |
+| `redis`     | `redis:7.4-alpine`                    | Объектный кэш (вытеснение LRU, пароль, персистентность выключена). |
 | `backup`    | свой `backup/Dockerfile`              | Ежедневный бэкап БД (+ опц. `wp-content`) в S3-хранилище через rclone. |
 
 **Сети:** `internal` (приватная, для каждого стека — БД/Redis наружу не выходят) и
@@ -602,16 +721,31 @@ HTTPS для всех сайтов.
 - **Определение HTTPS за прокси** прошито в `wp-config` — учитывает
   `X-Forwarded-Proto`/`X-Forwarded-For`, так что WordPress формирует корректные
   `https://`-ссылки и видит реальный IP клиента за NPM/Caddy.
-- **Готовность к миграциям** — загрузки 2 ГБ, таймауты 900 сек, пакет БД 512 МБ:
-  большие пакеты Duplicator/WPvivid импортируются без 504 и ошибок памяти.
-- **Производительность** — OPcache + JIT (512 МБ / 50k файлов), InnoDB buffer pool,
-  realpath cache, объектный кэш Redis.
+- **Объектный кэш без ручных шагов** — сайдкар сам ставит и включает drop-in
+  Redis Object Cache при первом запуске, поэтому настройки `WP_REDIS_*` из
+  `wp-config.php` действительно начинают работать, а не ждут, пока кто-то
+  вспомнит про плагин.
+- **Профили миграции — подключаемые** — лимиты для импорта многогигабайтного
+  пакета Duplicator/WPvivid (загрузки 2 ГБ, таймауты 900 сек, неограниченное
+  тело запроса) монтируются только на время переноса, а не остаются на живом
+  сайте, где это готовый вектор slowloris и заполнения диска.
+  См. [MIGRATION.md](MIGRATION.md).
+- **Производительность** — OPcache (512 МБ / 50k файлов), InnoDB buffer pool,
+  realpath cache, объектный кэш Redis без персистентности (это кэш).
 - **Усиление безопасности** — `DISALLOW_FILE_EDIT`, `FORCE_SSL_ADMIN`, опциональный
   `DISALLOW_FILE_MODS` для «заморозки» готового сайта, `expose_php = Off`, БД/Redis
-  в приватной сети.
-- **Эксплуатационная надёжность** — лимиты памяти на сервис, ограниченное JSON-
-  логирование (логи не забьют диск), healthcheck'и с порядком зависимостей,
-  автоматические off-host бэкапы в S3 с ротацией.
+  в приватной сети, **запрет выполнения PHP в `wp-content/uploads`**, закрытый
+  `xmlrpc.php`, недоступные по HTTP `debug.log`/`wp-config.php`/дот-файлы,
+  security-заголовки и опциональный оверлей, убирающий пароли БД из
+  `docker inspect`.
+- **Бэкапы, которым можно верить** — каждый дамп проверяется (целостность gzip +
+  маркер завершения) до загрузки, ротация физически не может оставить ноль
+  копий, есть клиентское шифрование, а `restore.sh --verify` доказывает
+  восстановимость бэкапа, не трогая базу.
+- **Эксплуатационная надёжность** — лимиты памяти **и CPU** на сервис,
+  ограниченное JSON-логирование, healthcheck'и с порядком зависимостей, таймаут
+  крона (одна зависшая задача не остановит цикл) и опциональный профиль
+  `autoheal`, который реально перезапускает нездоровые контейнеры.
 - **Мультитенантность by design** — `STACK_NAME` именует всё; десятки сайтов на
   одной машине, у каждого свой профиль.
 - **Почта без плагина** — `wp_mail()` уходит через msmtp, настройка целиком из
@@ -643,12 +777,12 @@ cd mysite
 # 2) Создать общую сеть прокси ОДИН раз на сервер (имя любое; должно совпадать с .env)
 docker network create web-proxy
 
-# 3) Настроить
-cp .env.example .env
-nano .env          # задать STACK_NAME, DOMAIN, WP_HOME/WP_SITEURL, все пароли,
-                   # WORDPRESS_LOCAL_PORT (уникальный), PROXY_NETWORK=web-proxy
+# 3) Настроить — init.sh создаст .env и СГЕНЕРИРУЕТ секреты
+./init.sh --stack mysite --domain mysite.ru --port 8088
+nano .env          # руками заполнить SMTP_* (почта) и S3_* (бэкапы)
 
-# 4) Preflight: поймать placeholder-секреты, плохие значения, отсутствие сети
+# 4) Preflight: placeholder-секреты, слабые пароли, конфликт портов,
+#    ошибки SMTP, несоответствие buffer pool / лимитов памяти, отсутствие сети
 ./verify.sh
 
 # 5) Собрать + запустить (первая сборка — несколько минут)
@@ -660,9 +794,15 @@ docker compose logs -f wordpress
 ```
 
 Затем направьте домен на сервер, зарегистрируйте его в edge-прокси
-(→ форвард на `<STACK_NAME>_wordpress:80`), откройте сайт, завершите мастер
-установки WordPress и включите плагин **Redis Object Cache**. Подробный
-пошаговый гайд (включая Portainer и NPM) — в **[DEPLOY.md](DEPLOY.md)**.
+(→ форвард на `<STACK_NAME>_wordpress:80`), откройте сайт и завершите мастер
+установки WordPress. Drop-in **Redis Object Cache** сайдкар `wp-cron` поставит и
+включит сам (`WP_AUTO_ENABLE_REDIS=false` — если хотите делать это руками).
+Подробный пошаговый гайд — в **[DEPLOY.md](DEPLOY.md)**.
+
+> Хотите писать `.env` руками? `cp .env.example .env` по-прежнему работает — но
+> пароли **генерируйте**, а не придумывайте: `openssl rand -base64 24`.
+> `./verify.sh` теперь отклоняет всё короче 16 символов и любой оставшийся
+> `example.com`.
 
 <a name="справочник-env"></a>
 ## Справочник по `.env`
@@ -745,9 +885,10 @@ docker compose logs -f wordpress
 
 | Файл | Что задаёт | Дефолты Heavy |
 |------|-----------|---------------|
-| [`php/php.ini`](php/php.ini) | Память PHP, загрузки, OPcache + JIT | `memory_limit 1024M`, загрузки 2048M, `max_input_vars 10000`, OPcache 512M / 50k файлов, JIT 128M |
+| [`php/php.ini`](php/php.ini) | Память PHP, загрузки, OPcache | `memory_limit 1024M`, загрузки 512M, `max_input_vars 10000`, OPcache 512M / 50k файлов, JIT выключен |
 | [`mariadb/my.cnf`](mariadb/my.cnf) | InnoDB buffer pool, размер пакета, таймауты | `innodb_buffer_pool_size 1G`, `max_allowed_packet 512M`, utf8mb4 |
-| [`apache/migration.conf`](apache/migration.conf) | Таймауты Apache / лимиты тела запроса | `Timeout 900`, `LimitRequestBody 0`, keep-alive |
+| [`apache/hardening.conf`](apache/hardening.conf) | Доверенный прокси, лимиты запроса, запреты файлов, заголовки | `LimitRequestBody 600M`, `Timeout 120`, PHP в uploads запрещён, xmlrpc закрыт |
+| [`apache/migration.conf.example`](apache/migration.conf.example) | **Временные** лимиты для импорта (не смонтирован) | `Timeout 900`, `LimitRequestBody 0` |
 | [`Dockerfile`](Dockerfile) | Доп. расширения PHP + wp-cli | phpredis, soap, wp-cli |
 
 `php/php.ini` поставляется как профиль **Heavy**. Для небольших сайтов скопируйте
@@ -814,18 +955,28 @@ docker compose up -d wordpress              # применить
 | `memory_limit` | `256M` | `512M` | `1024M` |
 | `opcache.memory_consumption` | `128` | `256` | `512` |
 | `opcache.max_accelerated_files` | `20000` | `30000` | `50000` |
-| `opcache.jit_buffer_size` | `off` | `64M` | `128M` |
+| `opcache.jit` | `off` | `off` | `off` |
 
-**Часть B — правки файлов** (`mariadb/my.cnf`):
+**Часть C — правки файлов** (`mariadb/my.cnf`) — та же логика: колонки совпадают
+с готовыми `mariadb/my.cnf.light.example` / `mariadb/my.cnf.medium.example`:
 
 | Параметр | Light | Medium | Heavy |
 |----------|:---:|:---:|:---:|
 | `innodb_buffer_pool_size` | `256M` | `512M` | `1G` |
 | `innodb_buffer_pool_instances` | `1` | `1` | `2` |
 
-> Держите `WP_MEMORY_LIMIT ≤ memory_limit в php.ini`, а `REDIS_MAXMEMORY` чуть ниже
-> `REDIS_MEM_LIMIT`. **Пример сервера:** машина 16 ГБ спокойно тянет ~1 Heavy +
-> 3–4 Light, либо ~6–7 Medium — всегда оставляйте 1–2 ГБ хосту + прокси.
+```bash
+cp mariadb/my.cnf.light.example  mariadb/my.cnf   # небольшой сайт
+cp mariadb/my.cnf.medium.example mariadb/my.cnf   # лёгкий WooCommerce
+docker compose up -d db                           # применить
+```
+
+> Держите `WP_MEMORY_LIMIT ≤ memory_limit в php.ini`, `REDIS_MAXMEMORY` чуть ниже
+> `REDIS_MEM_LIMIT`, а `innodb_buffer_pool_size` — заметно ниже `DB_MEM_LIMIT`:
+> не влезший в лимит пул приводит не к замедлению, а к убийству БД по OOM.
+> `./verify.sh` проверяет все три соотношения. **Пример сервера:** машина 16 ГБ
+> спокойно тянет ~1 Heavy + 3–4 Light, либо ~6–7 Medium — всегда оставляйте
+> 1–2 ГБ хосту + прокси.
 
 <a name="обратный-прокси"></a>
 ## Обратный прокси: NPM или Caddy
@@ -898,8 +1049,10 @@ docker compose logs -f backup
 <a name="перенос"></a>
 ## Перенос существующего сайта
 
-Стек заранее настроен так, чтобы большие пакеты Duplicator/WPvivid импортировались
-гладко (загрузки 2 ГБ, таймауты 900 сек, пакет БД 512 МБ).
+Импорт многогигабайтного пакета Duplicator/WPvivid требует лимитов, которые
+опасно оставлять на живом сайте, поэтому они поставляются как **подключаемые
+профили** (`php/php.ini.migration.example` + `apache/migration.conf.example`):
+монтируете на время переноса и снимаете после. MariaDB менять не нужно.
 
 > **Золотое правило:** используйте поток **Import / Restore** самого плагина в
 > *свежеустановленный* WordPress, который даёт этот контейнер. **Не** запускайте
@@ -936,6 +1089,38 @@ docker compose down                 # остановка (тома сохран�
 > `docker compose down -v` **удаляет тома** (файлы сайта, БД, кэш). Не запускайте,
 > если не собираетесь стереть сайт.
 
+### Обновление (WordPress, PHP, MariaDB)
+
+Образ пинит конкретную версию WordPress/PHP, поэтому обновление происходит при
+пересборке — и пересборка может оказаться мажорным апгрейдом. Сначала снимите
+дамп БД; сервис бэкапа опциональный и может быть выключен:
+
+```bash
+docker compose --profile backup run --rm \
+  --entrypoint /usr/local/bin/backup.sh backup      # проверенный дамп в S3
+docker compose pull && docker compose up -d --build
+docker compose exec -u www-data wordpress wp core version
+```
+
+Если что-то пошло не так — `restore.sh --db latest --yes` вернёт базу (и перед
+этим сам снимет снапшот текущего состояния).
+
+### Реакция на нездоровые контейнеры
+
+Политика `restart:` в Docker реагирует на **выход** контейнера, а не на
+провалившийся healthcheck — поэтому зависший `wp-cron` или устаревший `backup`
+будут вечно светиться красным, и ничего не произойдёт. Включите опциональный
+профиль `autoheal`, чтобы их перезапускало:
+
+```bash
+# в .env
+COMPOSE_PROFILES=backup,autoheal
+```
+
+Ему нужен доступ к Docker-сокету, а право записи в сокет равнозначно root на
+хосте — нормально на своём одно-арендном сервере, не годится на общем.
+Альтернатива — внешний мониторинг, следящий за health контейнеров.
+
 <a name="решение-проблем"></a>
 ## Решение проблем
 
@@ -946,41 +1131,100 @@ docker compose down                 # остановка (тома сохран�
 | Загрузка обрывается / 504 при импорте | Таймаут прокси или PHP | Используйте `docker cp` (см. MIGRATION.md); поднимите read-таймаут прокси. |
 | «Allowed memory exhausted» | Большие сериализованные данные Elementor/Woo | Поднимите `WP_MAX_MEMORY_LIMIT` + `memory_limit` в `php.ini`. |
 | Redis показывает «Predis», не «PhpRedis» | Drop-in не использует нативный клиент | В образе есть phpredis — переактивируйте плагин Redis Object Cache / сделайте flush. |
+| Объектный кэш так и не включился | Сайдкар не смог поставить drop-in | `docker compose logs wp-cron`; нужны `WP_AUTO_ENABLE_REDIS=true` и `DISALLOW_FILE_MODS=false`. |
+| Письма тихо не доходят | `SMTP_HOST` пуст | Ищите `message DROPPED` в `docker compose logs wordpress`; см. [MAIL.md](MAIL.md). |
+| Релей отвергает отправителя | `SMTP_FROM` не подтверждён у релея | Укажите адрес, разрешённый провайдером — это envelope sender. |
+| Загрузка отклоняется на ~600 МБ | Apache `LimitRequestBody` в hardened-профиле | Так и задумано. Смонтируйте профиль миграции временно — [MIGRATION.md](MIGRATION.md). |
+| Контейнер БД убит по OOM | `innodb_buffer_pool_size` > `DB_MEM_LIMIT` | Запустите `./verify.sh`; возьмите более лёгкий профиль `my.cnf` или поднимите лимит. |
 | «Loopback request failed» в Site Health | Hairpin NAT за прокси | Косметика (крон идёт через сайдкар); опц. фикс `extra_hosts` в DEPLOY.md §8. |
 | Порт занят при старте | Конфликт `WORDPRESS_LOCAL_PORT` | Дайте каждому стеку уникальный хост-порт. |
 
 <a name="безопасность"></a>
 ## Чек-лист безопасности
 
+**Секреты**
+
 - **Никогда не коммитьте настоящий `.env`.** В git идут только шаблоны
   `*.env.example`. Проверяйте `git status` перед пушем.
-- Используйте **сильные, уникальные** секреты на каждый сайт
-  (`openssl rand -base64 24`); не переиспользуйте пароли между сайтами.
-- `chmod 600 .env` на сервере.
+- Пусть секреты **генерирует** `./init.sh`; `./verify.sh` отклоняет всё короче
+  16 символов и любой оставшийся placeholder. Не переиспользуйте пароли между
+  сайтами.
+- `chmod 600 .env` на сервере (`init.sh` делает это сам).
+- Чтобы убрать пароли БД из `docker inspect` и интерфейса Portainer, включите
+  оверлей [`docker-compose.secrets.yml`](docker-compose.secrets.yml). В его
+  заголовке описано, что он закрывает, а что — нет.
 - **Если секрет утёк** (закоммичен, вставлен, передан): ротируйте — смените пароли
   БД/Redis, отзовите и перевыпустите ключи S3 в панели провайдера.
-- Давайте ключам S3 **минимальные права** (запись только в один бакет бэкапов) —
-  никогда не аккаунт-широкие админ-ключи.
+
+**Бэкапы** (подробности в [BACKUP.md](BACKUP.md))
+
+- Задайте `BACKUP_ENCRYPT_PASSWORD`. В дампах — имена, адреса, телефоны и история
+  заказов клиентов; без шифрования утечка бакета = утечка персональных данных.
+  Храните парольную фразу отдельно — это единственная копия.
+- Давайте ключам S3 **минимальные права** (только этот бакет) — никогда не
+  аккаунт-широкие админ-ключи.
+- Включите **версионирование + object lock** у бакета. Ротации нужно право
+  удаления, поэтому ключи из контейнера могут стереть и все ваши бэкапы;
+  версионирование — то, что переживёт компрометацию хоста.
+- Регулярно запускайте `restore.sh --verify`. Непроверенный бэкап — догадка.
+
+**Сеть и рантайм**
+
 - БД и Redis остаются в **приватной** сети `internal` — наружу не публикуются.
 - Хост-порт привязан к `127.0.0.1`, если вы явно не задали `WP_HTTP_BIND`.
+- Сузьте `TRUSTED_PROXY_CIDRS` до подсети своего edge-прокси. Он определяет, кому
+  разрешено задавать IP клиента через `X-Forwarded-For`; по умолчанию доверяются
+  все приватные диапазоны, а это все остальные контейнеры в сети прокси.
+- [`apache/hardening.conf`](apache/hardening.conf) запрещает выполнение PHP в
+  `wp-content/uploads`, закрывает `xmlrpc.php`, `debug.log`, `wp-config.php`,
+  `readme.html` и дот-файлы, отключает листинги каталогов и ставит
+  `X-Content-Type-Options` / `X-Frame-Options` / `Referrer-Policy`.
+  **Раскомментируйте блок `xmlrpc.php`**, если пользуетесь мобильным приложением
+  WordPress или Jetpack.
+- В продакшене профили миграции должны быть **не смонтированы**.
+  `LimitRequestBody 0` вместе с отключённым таймаутом тела позволяет одному
+  клиенту держать соединение открытым бесконечно, заливая неограниченный объём.
+  Проверка:
+  `docker compose exec wordpress apachectl -t -D DUMP_RUN_CFG | grep -i limitrequestbody`
+- Отладочный вывод идёт в **лог контейнера**, а не в `wp-content/debug.log` (этот
+  путь внутри docroot и скачивается по HTTP).
 
 <a name="структура-проекта"></a>
 ## Структура проекта
 
 ```
 .
-├── docker-compose.yml      # стек: wordpress, wp-cron, db, redis, backup
-├── Dockerfile              # свой образ WP: phpredis + soap + wp-cli
-├── .env.example            # шаблон конфигурации (копировать → .env)
-├── verify.sh               # preflight: проверка .env перед деплоем
-├── php/php.ini             # тюнинг PHP (память, загрузки, OPcache+JIT)
-├── mariadb/my.cnf          # тюнинг MariaDB/InnoDB
-├── apache/migration.conf   # таймауты Apache / лимиты загрузки / доверенный прокси
-├── mail/wp-sendmail.sh     # SMTP-обёртка (msmtp) для отправки почты без плагина
-├── backup/                 # сервис бэкапа в S3 (Dockerfile, backup.sh, entrypoint.sh, healthcheck.sh)
-├── proxy-caddy/            # опциональный edge-прокси Caddy (когда нет NPM)
-├── ci/                     # вспомогательные скрипты CI (проверка полноты env)
-├── .github/workflows/      # CI: линт, валидация compose, сборка + скан Trivy
+├── docker-compose.yml           # стек: wordpress, wp-cron, db, redis, backup, autoheal
+├── docker-compose.secrets.yml   # ОПЦИОНАЛЬНЫЙ оверлей: пароли из файлов, не из env
+├── Dockerfile                   # свой образ WP: phpredis + soap + wp-cli + msmtp
+├── .env.example                 # шаблон конфигурации (копировать → .env)
+├── .dockerignore                # не пускает .git/докой/секреты в build-контекст
+├── init.sh                      # создать .env с СГЕНЕРИРОВАННЫМИ секретами
+├── verify.sh                    # preflight: проверка .env перед деплоем
+├── php/
+│   ├── php.ini                  # тюнинг PHP, профиль HEAVY (смонтирован)
+│   ├── php.ini.light.example    # блог / лендинг
+│   ├── php.ini.medium.example   # корпоративный сайт / лёгкий WooCommerce
+│   └── php.ini.migration.example # ВРЕМЕННО: лимиты для многогигабайтного импорта
+├── mariadb/
+│   ├── my.cnf                   # тюнинг MariaDB/InnoDB, профиль HEAVY (смонтирован)
+│   ├── my.cnf.light.example     # небольшой сайт
+│   └── my.cnf.medium.example    # лёгкий WooCommerce
+├── apache/
+│   ├── hardening.conf           # всегда смонтирован: прокси, лимиты, запреты файлов
+│   └── migration.conf.example   # ВРЕМЕННО: без лимита тела / долгие таймауты
+├── mail/wp-sendmail.sh          # SMTP-обёртка (msmtp) для отправки почты без плагина
+├── backup/                      # сервис бэкапа в S3
+│   ├── backup.sh                # дамп → проверка → загрузка → ротация
+│   ├── restore.sh               # --list / --verify / --db / --fetch-files
+│   ├── lib.sh                   # общий remote + чтение секретов из файлов
+│   ├── entrypoint.sh            # ежедневный планировщик
+│   └── healthcheck.sh           # unhealthy, если нет свежего УСПЕШНОГО бэкапа
+├── proxy-caddy/                 # опциональный edge-прокси Caddy (когда нет NPM)
+├── ci/
+│   ├── check-env-vars.sh        # .env.example документирует все нужные переменные
+│   └── test-verify.sh           # тесты самого verify.sh
+├── .github/workflows/           # CI: линт, валидация, smoke-запуск стека, Trivy
 ├── README.md               # ← вы здесь
 ├── DEPLOY.md               # полный гайд по деплою (Portainer + NPM)
 ├── BACKUP.md               # процедуры бэкапа и восстановления
