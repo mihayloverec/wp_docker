@@ -75,8 +75,23 @@ x-wp-app-env: &wp-app-env
 
     /* Filesystem & updates */
     define('FS_METHOD', 'direct');
+
+    /* Core is installed BY THE IMAGE and pinned in the Dockerfile, so
+       WordPress must not update itself in the volume: it would drift from
+       the image and be silently reverted on the next rebuild. Updates
+       arrive by bumping the image (Dependabot opens the PR weekly) —
+       see "Upgrading" in README.
+       Site Health reports this as "Background updates are not working
+       correctly". That is EXPECTED here, not a fault.
+       These two settings used to contradict each other: with
+       AUTOMATIC_UPDATER_DISABLED=true the whole updater is off, which makes
+       WP_AUTO_UPDATE_CORE='minor' dead config that reads as if minor
+       releases were being applied. Only the operative one is kept.
+       NOTE: this also disables plugin/theme auto-updates. Plugins live in
+       the volume and are NOT managed by the image, so if you would rather
+       have WordPress apply plugin security releases itself, drop this line
+       and set WP_AUTO_UPDATE_CORE=false instead. */
     define('AUTOMATIC_UPDATER_DISABLED', true);
-    define('WP_AUTO_UPDATE_CORE', 'minor');
 
     /* Memory */
     define('WP_MEMORY_LIMIT', '${WP_MEMORY_LIMIT:-1024M}');

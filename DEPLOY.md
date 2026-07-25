@@ -280,10 +280,11 @@ green. What's already handled and the few manual items:
 |------------------|--------|-------|
 | PHP version (8.3), required modules | ✅ | imagick, gd, intl, zip, exif, soap, redis all present |
 | Persistent object cache | ✅ | Drop-in installed + enabled automatically by the `wp-cron` sidecar (step 7) |
+| REST API / loopback | ✅ | Both need the container to reach `WP_HOME` from the inside. Fine in production; see the note below if you test with a host-mapped port locally. |
 | Scheduled events / WP-Cron | ✅ | Real cron via the `wp-cron` sidecar (pseudo-cron disabled) |
 | HTTPS status | ✅ | `X-Forwarded-Proto` from NPM is honored; set `WP_HOME/WP_SITEURL` to `https://` |
 | utf8mb4 / DB version | ✅ | MariaDB 11.4, utf8mb4 |
-| Background updates | ℹ️ info | Core auto-update is intentionally disabled (managed deploys) — safe to ignore |
+| Background updates | ⚠️ expected | `AUTOMATIC_UPDATER_DISABLED` is set on purpose: core comes from the pinned image, so self-updating would drift from it and be reverted on the next rebuild. Site Health calls this "not working correctly" — that is by design. Updates arrive by bumping the image (Dependabot). It also disables plugin auto-updates; see the note in `docker-compose.yml` if you want those on. |
 
 **Loopback request warning.** Site Health (and some plugins) make an HTTP
 "loopback" request to the site's own URL. Behind NPM the container resolves

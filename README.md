@@ -516,7 +516,8 @@ alternative is external monitoring watching container health.
 | Relay rejects the sender | `SMTP_FROM` not authorised at the relay | Use an address the provider has verified — it is the envelope sender. |
 | Upload rejected at ~600 MB | Apache `LimitRequestBody` in the hardened profile | Expected. Mount the migration profile temporarily — [MIGRATION.md](MIGRATION.md). |
 | DB container OOM-killed | `innodb_buffer_pool_size` > `DB_MEM_LIMIT` | Run `./verify.sh`; use a lighter `my.cnf` profile or raise the limit. |
-| "Loopback request failed" in Site Health | Hairpin NAT behind the proxy | Cosmetic here (cron runs via the sidecar); optional `extra_hosts` fix in DEPLOY.md §8. |
+| "Loopback request failed" / REST API cURL error 7 | The container cannot reach `WP_HOME` from inside itself | Usually local-only: with `WORDPRESS_LOCAL_PORT=8088` the host maps 8088→80, but inside the container only port 80 exists, so `http://localhost:8088` is refused. Locally use `WORDPRESS_LOCAL_PORT=80` with `WP_HOME=http://localhost`. In production it is hairpin NAT — optional `extra_hosts` fix in DEPLOY.md §8. |
+| "Background updates are not working" | `AUTOMATIC_UPDATER_DISABLED` is set deliberately | Expected: core comes from the pinned image, so self-updates would be reverted on the next rebuild. Update by bumping the image. |
 | Port already in use on start | `WORDPRESS_LOCAL_PORT` clashes | Give each stack a unique host port. |
 
 <a name="security"></a>
@@ -1175,7 +1176,8 @@ COMPOSE_PROFILES=backup,autoheal
 | Релей отвергает отправителя | `SMTP_FROM` не подтверждён у релея | Укажите адрес, разрешённый провайдером — это envelope sender. |
 | Загрузка отклоняется на ~600 МБ | Apache `LimitRequestBody` в hardened-профиле | Так и задумано. Смонтируйте профиль миграции временно — [MIGRATION.md](MIGRATION.md). |
 | Контейнер БД убит по OOM | `innodb_buffer_pool_size` > `DB_MEM_LIMIT` | Запустите `./verify.sh`; возьмите более лёгкий профиль `my.cnf` или поднимите лимит. |
-| «Loopback request failed» в Site Health | Hairpin NAT за прокси | Косметика (крон идёт через сайдкар); опц. фикс `extra_hosts` в DEPLOY.md §8. |
+| «Loopback request failed» / REST API cURL error 7 | Контейнер не может обратиться к `WP_HOME` изнутри себя | Обычно только локально: при `WORDPRESS_LOCAL_PORT=8088` хост отображает 8088→80, но внутри контейнера есть только порт 80, поэтому `http://localhost:8088` отказывает. Локально ставьте `WORDPRESS_LOCAL_PORT=80` и `WP_HOME=http://localhost`. В продакшене это hairpin NAT — опц. фикс `extra_hosts` в DEPLOY.md §8. |
+| «Фоновые обновления работают неправильно» | `AUTOMATIC_UPDATER_DISABLED` выставлен намеренно | Так и задумано: ядро приходит из запиненного образа, самообновление откатится при следующей пересборке. Обновляйтесь бампом образа. |
 | Порт занят при старте | Конфликт `WORDPRESS_LOCAL_PORT` | Дайте каждому стеку уникальный хост-порт. |
 
 <a name="безопасность"></a>
