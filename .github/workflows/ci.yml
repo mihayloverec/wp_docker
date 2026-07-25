@@ -66,7 +66,7 @@ jobs:
       - name: docker compose config (main stack, all profiles)
         run: |
           docker compose --env-file .env.example \
-            --profile backup --profile autoheal config -q
+            --profile backup --profile autoheal --profile fail2ban config -q
 
       - name: docker compose config (with the secrets overlay)
         run: |
@@ -255,11 +255,49 @@ jobs:
           echo "$out" | grep -q "exit=0"  || { echo "shim should not hard-fail"; exit 1; }
           echo "$out" | grep -q "DROPPED" || { echo "shim dropped mail SILENTLY"; exit 1; }
 
+      - name: fail2ban jail actually bans (filter + datepattern + findtime)
+        run: |
+          # Runs a real fail2ban against a generated log with the `dummy`
+          # action, so nothing touches the runner's firewall. Catches the two
+          # ways this jail was silently broken during development: a failregex
+          # that also tried to match the timestamp, and a datepattern with a
+          # literal Z instead of %z (which made every entry look hours old and
+          # be discarded). Both left a jail that started cleanly and never
+          # banned anyone, so a plain "does it start" check is not enough.
+          sh ci/test-fail2ban.sh
+
       - name: Backup image builds and its restore tool is wired up
         run: |
           docker compose --profile backup build backup
           docker compose --profile backup run --rm \
             --entrypoint /usr/local/bin/restore.sh backup --help
+
+      - name: Capabilities are actually dropped
+        run: |
+          fail=0
+          for svc in db redis wordpress wp-cron; do
+            cid=$(docker compose ps -q "$svc")
+            drop=$(docker inspect -f '{{json .HostConfig.CapDrop}}' "$cid")
+            add=$(docker inspect -f '{{json .HostConfig.CapAdd}}' "$cid")
+            echo "  $svc drop=$drop add=$add"
+            echo "$drop" | grep -q 'ALL' || { echo "  FAIL $svc does not drop ALL"; fail=1; }
+          done
+          # The sidecar runs as www-data and should need nothing back.
+          cid=$(docker compose ps -q wp-cron)
+          [ "$(docker inspect -f '{{json .HostConfig.CapAdd}}' "$cid")" = "null" ] \
+            || echo "  note: wp-cron has capabilities added"
+          exit $fail
+
+      - name: MariaDB root is not reachable over the network
+        run: |
+          # MARIADB_ROOT_HOST=localhost means root@'%' is never created, so no
+          # other container on the internal network can even attempt root.
+          docker compose exec -T db mariadb -uroot -p"$(grep '^MYSQL_ROOT_PASSWORD=' .env | cut -d= -f2-)" \
+            -N -B -e "SELECT CONCAT(user,'@',host) FROM mysql.global_priv WHERE user='root';" \
+            | tee /tmp/roots.txt
+          grep -q "root@localhost" /tmp/roots.txt || { echo "root@localhost missing"; exit 1; }
+          grep -q "root@%" /tmp/roots.txt && { echo "root@'%' exists — it should not"; exit 1; }
+          echo "ok — root is localhost-only"
 
       - name: No fatal errors in any container log
         run: |

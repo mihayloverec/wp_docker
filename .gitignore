@@ -24,3 +24,6 @@ apache/migration.conf
 
 # Local Claude Code tooling config
 .claude/
+
+# Fixture dir created by ci/test-fail2ban.sh
+.f2b-selftest/

@@ -579,13 +579,31 @@ alternative is external monitoring watching container health.
   `docker compose exec wordpress apachectl -t -D DUMP_RUN_CFG | grep -i limitrequestbody`
 - Debug output goes to the **container log**, never to `wp-content/debug.log`
   (that path is inside the docroot and downloadable).
+- Every container runs with `cap_drop: ALL` and only the capabilities its image
+  genuinely needs (Apache gets `NET_BIND_SERVICE`; the wp-cron sidecar, which
+  already runs as `www-data`, gets none at all).
+- MariaDB's `root` account exists only as `root@'localhost'`
+  (`MARIADB_ROOT_HOST`), so no other container on the internal network can even
+  attempt a root login. `docker compose exec db mariadb -uroot` still works.
+  This applies at database initialisation, so on an **existing** stack remove
+  the remote account once:
+  ```bash
+  docker compose exec db mariadb -uroot -p"$MYSQL_ROOT_PASSWORD" \
+    -e "DROP USER IF EXISTS 'root'@'%'; FLUSH PRIVILEGES;"
+  ```
+- Enable the **`fail2ban`** profile to stop password guessing on
+  `wp-login.php` — nothing else in the stack rate-limits authentication. Put
+  your own IP in `ignoreip` first (`fail2ban/jail.d/wordpress.conf`).
+- The **`autoheal`** profile reaches Docker through a filtering proxy, so it can
+  list and restart containers but cannot exec into them, build images or touch
+  volumes — enabling it no longer means granting root on the host.
 
 <a name="project-layout"></a>
 ## Project layout
 
 ```
 .
-├── docker-compose.yml           # the stack: wordpress, wp-cron, db, redis, backup, autoheal
+├── docker-compose.yml           # the stack + opt-in backup/autoheal/fail2ban
 ├── docker-compose.secrets.yml   # OPT-IN overlay: passwords from files, not env
 ├── Dockerfile                   # custom WP image: phpredis + soap + wp-cli + msmtp
 ├── .env.example                 # configuration template (copy → .env)
@@ -605,6 +623,12 @@ alternative is external monitoring watching container health.
 │   ├── hardening.conf           # always mounted: trusted proxy, limits, file denials
 │   └── migration.conf.example   # TEMPORARY: unlimited body / long timeouts
 ├── mail/wp-sendmail.sh          # plugin-free SMTP shim (msmtp) for outgoing mail
+├── wordpress/mu-plugins/        # must-use plugins mounted read-only
+│   └── fail2ban-auth-log.php    # logs failed logins for fail2ban
+├── fail2ban/                    # opt-in brute-force protection
+│   ├── jail.d/wordpress.conf    # thresholds + YOUR ignoreip (tune here)
+│   ├── filter.d/                # log format -> failed-login regex
+│   └── action.d/docker-user.conf # bans in DOCKER-USER, not INPUT
 ├── backup/                      # S3 backup service
 │   ├── backup.sh                # dump → verify → upload → rotate
 │   ├── restore.sh               # --list / --verify / --db / --fetch-files
@@ -614,6 +638,8 @@ alternative is external monitoring watching container health.
 ├── proxy-caddy/                 # optional Caddy edge proxy (when there's no NPM)
 ├── ci/
 │   ├── check-env-vars.sh        # .env.example documents every required var
+│   ├── lint-shell.sh            # shellcheck exactly as CI runs it (per file)
+│   ├── test-fail2ban.sh         # proves the jail really bans (dummy action)
 │   └── test-verify.sh           # tests for verify.sh itself
 ├── .github/workflows/           # CI: lint, validate, smoke-boot the stack, Trivy
 ├── README.md                    # ← you are here
@@ -1215,13 +1241,32 @@ COMPOSE_PROFILES=backup,autoheal
   `docker compose exec wordpress apachectl -t -D DUMP_RUN_CFG | grep -i limitrequestbody`
 - Отладочный вывод идёт в **лог контейнера**, а не в `wp-content/debug.log` (этот
   путь внутри docroot и скачивается по HTTP).
+- Все контейнеры запускаются с `cap_drop: ALL` и получают обратно только те
+  capabilities, которые реально нужны образу (Apache — `NET_BIND_SERVICE`,
+  а сайдкару wp-cron, который и так работает от `www-data`, не нужно ничего).
+- Аккаунт `root` в MariaDB существует только как `root@'localhost'`
+  (`MARIADB_ROOT_HOST`), поэтому другие контейнеры внутренней сети не могут
+  даже попытаться войти под root. `docker compose exec db mariadb -uroot`
+  продолжает работать. Настройка применяется при инициализации БД, поэтому на
+  **существующем** стеке удалите сетевой аккаунт один раз:
+  ```bash
+  docker compose exec db mariadb -uroot -p"$MYSQL_ROOT_PASSWORD" \
+    -e "DROP USER IF EXISTS 'root'@'%'; FLUSH PRIVILEGES;"
+  ```
+- Включите профиль **`fail2ban`** против перебора паролей на `wp-login.php` —
+  больше ничто в стеке не ограничивает попытки аутентификации. Сначала внесите
+  свой IP в `ignoreip` (`fail2ban/jail.d/wordpress.conf`).
+- Профиль **`autoheal`** обращается к Docker через фильтрующий прокси: он может
+  перечислять и перезапускать контейнеры, но не может выполнять в них команды,
+  собирать образы или трогать тома — включение больше не означает выдачу root
+  на хосте.
 
 <a name="структура-проекта"></a>
 ## Структура проекта
 
 ```
 .
-├── docker-compose.yml           # стек: wordpress, wp-cron, db, redis, backup, autoheal
+├── docker-compose.yml           # стек + опциональные backup/autoheal/fail2ban
 ├── docker-compose.secrets.yml   # ОПЦИОНАЛЬНЫЙ оверлей: пароли из файлов, не из env
 ├── Dockerfile                   # свой образ WP: phpredis + soap + wp-cli + msmtp
 ├── .env.example                 # шаблон конфигурации (копировать → .env)
@@ -1241,6 +1286,12 @@ COMPOSE_PROFILES=backup,autoheal
 │   ├── hardening.conf           # всегда смонтирован: прокси, лимиты, запреты файлов
 │   └── migration.conf.example   # ВРЕМЕННО: без лимита тела / долгие таймауты
 ├── mail/wp-sendmail.sh          # SMTP-обёртка (msmtp) для отправки почты без плагина
+├── wordpress/mu-plugins/        # must-use плагины, монтируются только на чтение
+│   └── fail2ban-auth-log.php    # пишет неудачные логины для fail2ban
+├── fail2ban/                    # опциональная защита от перебора паролей
+│   ├── jail.d/wordpress.conf    # пороги + ВАШ ignoreip (настраивать здесь)
+│   ├── filter.d/                # формат лога -> regex неудачного логина
+│   └── action.d/docker-user.conf # бан в DOCKER-USER, а не в INPUT
 ├── backup/                      # сервис бэкапа в S3
 │   ├── backup.sh                # дамп → проверка → загрузка → ротация
 │   ├── restore.sh               # --list / --verify / --db / --fetch-files
@@ -1250,6 +1301,8 @@ COMPOSE_PROFILES=backup,autoheal
 ├── proxy-caddy/                 # опциональный edge-прокси Caddy (когда нет NPM)
 ├── ci/
 │   ├── check-env-vars.sh        # .env.example документирует все нужные переменные
+│   ├── lint-shell.sh            # shellcheck ровно как в CI (пофайлово)
+│   ├── test-fail2ban.sh         # доказывает, что jail реально банит (dummy)
 │   └── test-verify.sh           # тесты самого verify.sh
 ├── .github/workflows/           # CI: линт, валидация, smoke-запуск стека, Trivy
 ├── README.md               # ← вы здесь

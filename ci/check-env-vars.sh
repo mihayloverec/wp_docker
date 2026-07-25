@@ -15,7 +15,16 @@ missing=0
 
 # Pure ${NAME} references (the regex excludes ${NAME:-...} thanks to the
 # closing brace right after the name).
-vars="$(grep -oE '\$\{[A-Z_][A-Z0-9_]*\}' "${COMPOSE}" | sed -E 's/[${}]//g' | sort -u)"
+# Neutralise `$$` FIRST. Inside a service's `command:` block, `$$` is how you
+# escape a dollar so the SHELL expands the variable at runtime instead of
+# Compose expanding it at parse time — e.g. `$${AUTOHEAL_INTERVAL}`. Those are
+# shell variables, not stack configuration, and demanding they appear in
+# .env.example is simply wrong. Rewriting `$$` to `@@` makes them stop matching
+# the pattern below while leaving real `${VAR}` references untouched.
+compose_interpolations="$(sed 's/\$\$/@@/g' "${COMPOSE}")"
+
+vars="$(printf '%s\n' "${compose_interpolations}" \
+    | grep -oE '\$\{[A-Z_][A-Z0-9_]*\}' | sed -E 's/[${}]//g' | sort -u)"
 
 for v in ${vars}; do
     # If the same var appears anywhere with a :- default, it's optional.

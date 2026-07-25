@@ -70,3 +70,9 @@ RUN a2enmod remoteip headers
 # this shim, which relays through msmtp using the SMTP_* env vars.
 COPY mail/wp-sendmail.sh /usr/local/bin/wp-sendmail
 RUN chmod +x /usr/local/bin/wp-sendmail
+
+# Directory for the failed-login log that the optional fail2ban service reads.
+# Created HERE, owned by www-data, on purpose: when Docker initialises an empty
+# named volume it copies the ownership and mode of the image's directory. Left
+# to the volume alone it would be root-owned and PHP could not write to it.
+RUN mkdir -p /var/log/wp && chown www-data:www-data /var/log/wp

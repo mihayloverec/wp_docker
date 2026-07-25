@@ -129,12 +129,38 @@ services:
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
+    # Drop every Linux capability, add back only what the image needs:
+    # the entrypoint chowns the data dir as root, then drops to the mysql
+    # user via gosu.
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+      - DAC_OVERRIDE
+      - FOWNER
     logging: *default-logging
     environment:
       MARIADB_DATABASE: ${MYSQL_DATABASE}
       MARIADB_USER: ${MYSQL_USER}
       MARIADB_PASSWORD: ${MYSQL_PASSWORD}
       MARIADB_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      # Create root@'localhost' only, NOT the image's default root@'%'.
+      #
+      # Nothing in this stack connects as root — WordPress and the backup both
+      # use MYSQL_USER — so a network-reachable superuser is pure attack
+      # surface for every other container sharing the `internal` network.
+      # Administrative access still works, because `docker compose exec db
+      # mariadb -uroot -p...` connects from inside the container:
+      #   docker compose exec db mariadb -uroot -p"$MYSQL_ROOT_PASSWORD"
+      #
+      # NOTE: this only takes effect when the data directory is initialised,
+      # i.e. on a NEW stack. On an existing database, remove the remote
+      # account by hand once:
+      #   docker compose exec db mariadb -uroot -p"$MYSQL_ROOT_PASSWORD" \
+      #     -e "DROP USER IF EXISTS 'root'@'%'; FLUSH PRIVILEGES;"
+      MARIADB_ROOT_HOST: localhost
       MARIADB_AUTO_UPGRADE: "1"
       TZ: ${TZ}
     volumes:
@@ -163,6 +189,14 @@ services:
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
+    # Entrypoint chowns /data and drops to the redis user via su-exec.
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+      - DAC_OVERRIDE
     logging: *default-logging
     # Pure cache, no persistence: both RDB (--save "") and AOF
     # (--appendonly no) are OFF.
@@ -226,6 +260,18 @@ services:
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
+    # Apache binds port 80 (NET_BIND_SERVICE), spawns workers as www-data
+    # (SETUID/SETGID), and the entrypoint unpacks WordPress into the volume
+    # and fixes ownership (CHOWN/FOWNER/DAC_OVERRIDE).
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+      - DAC_OVERRIDE
+      - FOWNER
+      - NET_BIND_SERVICE
     logging: *default-logging
     depends_on:
       db:
@@ -252,6 +298,12 @@ services:
       # apache/migration.conf.example and are mounted temporarily via
       # docker-compose.override.yml — see MIGRATION.md.
       - ./apache/hardening.conf:/etc/apache2/conf-enabled/zz-hardening.conf:ro
+      # Logs failed logins for the optional fail2ban service. Mounted as a
+      # single file rather than over the whole mu-plugins directory, so any
+      # other must-use plugin on the volume keeps working. Read-only: it stays
+      # unmodifiable even if a WordPress admin account is compromised.
+      - ./wordpress/mu-plugins/fail2ban-auth-log.php:/var/www/html/wp-content/mu-plugins/fail2ban-auth-log.php:ro
+      - auth_logs:/var/log/wp
     healthcheck:
       # No curl/wget in the image, so probe port 80 with PHP (always present).
       test: [ "CMD", "php", "-r", "exit(@fsockopen('localhost', 80, $$e, $$s, 2) ? 0 : 1);" ]
@@ -286,6 +338,10 @@ services:
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
+    # Nothing added: this container already starts as www-data (see `user:`)
+    # and only runs wp-cli, so it never needs a privileged operation.
+    cap_drop:
+      - ALL
     logging: *default-logging
     user: www-data
     depends_on:
@@ -443,6 +499,11 @@ services:
       - wp_data:/var/www/html:ro   # read-only, only for the files backup
     security_opt:
       - no-new-privileges:true
+    # Nothing added: it writes to /tmp (world-writable), reads the site
+    # volume read-only through normal permissions, and talks to the DB and
+    # S3 over the network.
+    cap_drop:
+      - ALL
     deploy:
       resources:
         limits:
@@ -470,43 +531,194 @@ services:
   # backup stale) are indicators that nobody acts on — a wedged wp-cron
   # would sit red indefinitely.
   #
-  # TRADE-OFF, read before enabling: this needs the Docker socket, and
-  # write access to /var/run/docker.sock is equivalent to root on the host.
-  # It is a reasonable trade on a single-tenant server you already control;
-  # it is NOT something to enable on a shared host. The alternative is to
-  # have external monitoring watch `docker ps` health and page a human.
-  # Only containers labelled autoheal=true (this stack's) are touched.
+  # Only containers labelled autoheal=true (this stack's) are touched, and it
+  # reaches Docker through the socket proxy below rather than the socket
+  # itself — so enabling it no longer means handing a container root on the
+  # host. See the proxy service for what is and isn't allowed through.
+  # Implemented against the official docker CLI image rather than a
+  # third-party autoheal image: willfarrell/autoheal only publishes a moving
+  # `latest` (its semver tags are from 2021) and the published image is
+  # missing the script it tries to exec, on both arm64 and amd64. The whole
+  # behaviour is the loop below, so a pinned official image and ten lines of
+  # shell is both smaller and auditable.
   autoheal:
     profiles: [ "autoheal" ]
-    image: willfarrell/autoheal:1.2.0
+    image: docker:29-cli
     container_name: ${STACK_NAME:-wordpress}_autoheal
     restart: unless-stopped
     logging: *default-logging
+    depends_on:
+      - docker-socket-proxy
     security_opt:
       - no-new-privileges:true
+    # Nothing added: it only makes HTTP calls to the socket proxy.
+    cap_drop:
+      - ALL
     environment:
       TZ: ${TZ}
-      AUTOHEAL_CONTAINER_LABEL: autoheal
+      # TCP against the proxy instead of a bind-mounted socket.
+      DOCKER_HOST: tcp://docker-socket-proxy:2375
       AUTOHEAL_INTERVAL: ${AUTOHEAL_INTERVAL:-30}
-      # Grace period after a container starts before it may be restarted.
-      AUTOHEAL_START_PERIOD: ${AUTOHEAL_START_PERIOD:-300}
-      DOCKER_SOCK: /var/run/docker.sock
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+      # Compose sets this label on every container it creates. Filtering on it
+      # keeps autoheal inside its OWN stack: on a host running several sites
+      # from this template, every stack uses autoheal=true, so without this a
+      # single autoheal instance would restart the neighbours' containers too.
+      COMPOSE_PROJECT: ${STACK_NAME:-wordpress}
+    entrypoint: [ "/bin/sh", "-c" ]
+    command:
+      - |
+        echo "[autoheal] watching $${COMPOSE_PROJECT} containers labelled autoheal=true every $${AUTOHEAL_INTERVAL}s"
+        # No grace-period setting is needed: Docker reports a container as
+        # "starting", not "unhealthy", for the duration of its own
+        # start_period. So each service's start_period already IS its grace
+        # period, and a slow-booting container cannot be restarted out from
+        # under itself.
+        while true; do
+          for id in $$(docker ps -q --filter health=unhealthy --filter label=autoheal=true \
+                         --filter "label=com.docker.compose.project=$${COMPOSE_PROJECT}"); do
+            name=$$(docker inspect --format '{{.Name}}' "$$id" 2>/dev/null | tr -d '/')
+            echo "[autoheal] $${name:-$$id} is unhealthy — restarting"
+            if docker restart "$$id" >/dev/null 2>&1; then
+              echo "[autoheal] $${name:-$$id} restarted"
+            else
+              echo "[autoheal] FAILED to restart $${name:-$$id}"
+            fi
+          done
+          sleep "$${AUTOHEAL_INTERVAL}"
+        done
+    networks:
+      - socket-proxy
     deploy:
       resources:
         limits:
           memory: 64m
           cpus: "0.5"
 
+  # Filtering proxy in front of the Docker API, for the autoheal profile.
+  #
+  # Write access to /var/run/docker.sock is equivalent to root on the host: it
+  # allows creating a privileged container that mounts the host filesystem. So
+  # autoheal — which only needs to list containers and restart them — must not
+  # get the raw socket just because that is the easy way to wire it up.
+  #
+  # This proxy is the only container that mounts the socket, and it mounts it
+  # READ-ONLY. It exposes just two API sections:
+  #   CONTAINERS=1  GET /containers/json      (find unhealthy ones)
+  #   POST=1        POST /containers/*/restart
+  # Everything else stays denied by default, most importantly:
+  #   EXEC=0     no running commands inside other containers
+  #   IMAGES=0   no building or pulling images
+  #   VOLUMES=0  no touching data
+  #   INFO=0, NETWORKS=0, SWARM=0, SYSTEM=0, ...
+  #
+  # HONEST LIMIT: the CONTAINERS+POST pair is coarser than "restart only" —
+  # it also permits kill/stop/start on containers. That is a large reduction
+  # from full socket access, not a complete fix; the endpoints that give host
+  # takeover (exec, image build, arbitrary bind mounts) are the ones closed.
+  # It is never published to the host and lives on its own network, reachable
+  # only by autoheal.
+  docker-socket-proxy:
+    profiles: [ "autoheal" ]
+    image: tecnativa/docker-socket-proxy:0.3.0
+    container_name: ${STACK_NAME:-wordpress}_socket_proxy
+    restart: unless-stopped
+    logging: *default-logging
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      CONTAINERS: 1
+      POST: 1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - socket-proxy
+    deploy:
+      resources:
+        limits:
+          memory: 64m
+          cpus: "0.5"
+
+  # Brute-force protection for wp-login.php. OPT-IN: `--profile fail2ban`.
+  #
+  # Reads the failed-login log written by the mu-plugin and bans the source
+  # address. WordPress has no login lockout of its own and Apache cannot tell a
+  # failed login from a successful one (both are HTTP 200 on wp-login.php), so
+  # without this an attacker can try passwords at network speed forever.
+  #
+  # TWO THINGS TO UNDERSTAND BEFORE ENABLING:
+  #
+  # 1) network_mode: host + NET_ADMIN. Banning means writing host firewall
+  #    rules, which cannot be done from inside an isolated network namespace.
+  #    This is a real privilege — NET_ADMIN on the host network lets this
+  #    container rewrite the host's packet filtering. It is far narrower than
+  #    the Docker socket (no container or image control), but it is not
+  #    nothing. Everything else is dropped via cap_drop.
+  #
+  # 2) Bans go in Docker's DOCKER-USER chain, not INPUT. Traffic to a published
+  #    container port is DNAT'ed and never traverses INPUT, so fail2ban's stock
+  #    actions would report bans that drop no packets at all. See
+  #    fail2ban/action.d/docker-user.conf.
+  #
+  # Tune thresholds and YOUR OWN ignoreip in fail2ban/jail.d/wordpress.conf.
+  # Check on it with:
+  #   docker compose exec fail2ban fail2ban-client status wordpress-auth
+  fail2ban:
+    profiles: [ "fail2ban" ]
+    image: crazymax/fail2ban:1.1.0
+    container_name: ${STACK_NAME:-wordpress}_fail2ban
+    restart: unless-stopped
+    logging: *default-logging
+    # Host network + NET_ADMIN are what make banning possible at all.
+    network_mode: host
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      TZ: ${TZ}
+      F2B_LOG_TARGET: STDOUT
+      F2B_LOG_LEVEL: ${F2B_LOG_LEVEL:-INFO}
+      # Keep ban state across restarts so a restart is not an amnesty.
+      F2B_DB_PURGE_AGE: 30d
+    volumes:
+      # This image expects custom config under /data and symlinks it into
+      # /etc/fail2ban itself. Mounting straight onto /etc/fail2ban/jail.d also
+      # happens to work, but makes the entrypoint log
+      # "ln: /etc/fail2ban/jail.d: File exists" on every start.
+      - ./fail2ban/jail.d:/data/jail.d:ro
+      - ./fail2ban/filter.d:/data/filter.d:ro
+      - ./fail2ban/action.d:/data/action.d:ro
+      # The log it watches — read-only, it never needs to write to the site.
+      - auth_logs:/var/log/wp:ro
+      # Ban database, so a restart is not an amnesty. The path is /data/db:
+      # this image does NOT use fail2ban's Debian default of
+      # /var/lib/fail2ban, so a volume mounted there would persist nothing.
+      - fail2ban_db:/data/db
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+          cpus: "0.5"
+
 volumes:
   db_data:
   wp_data:
   redis_data:
+  # Failed-login log: written by the WordPress container, read by fail2ban.
+  auth_logs:
+  fail2ban_db:
 
 networks:
   internal:
     driver: bridge
+  # Isolates the Docker API proxy: only autoheal is attached, so nothing else
+  # in the stack can reach the Docker API even in a filtered form.
+  socket-proxy:
+    driver: bridge
+    internal: true
   proxy:
     external: true
     name: ${PROXY_NETWORK}
