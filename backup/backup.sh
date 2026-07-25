@@ -17,6 +17,9 @@ set -euo pipefail
 # shellcheck source=backup/lib.sh
 . /usr/local/bin/lib.sh
 
+# Read by log()/fail() in lib.sh, so it looks unused when this file is
+# analysed on its own (which is how the CI shellcheck action runs).
+# shellcheck disable=SC2034
 LOG_TAG="backup"
 DB_HOST="${DB_HOST:-db}"
 RETENTION_DAYS="${RETENTION_DAYS:-14}"

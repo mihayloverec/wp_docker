@@ -199,8 +199,21 @@ jobs:
           done
           docker compose exec -T -u www-data wordpress \
             test -f /var/www/html/wp-content/object-cache.php \
-            || { echo "::error::Redis object-cache drop-in never appeared"; \
-                 echo "--- wp-cron log ---"; docker compose logs --no-color wp-cron; exit 1; }
+            || {
+                 echo "::error::Redis object-cache drop-in never appeared"
+                 echo "--- container state ---"; docker compose ps
+                 echo "--- wp-cron log ---";     docker compose logs --no-color wp-cron
+                 # Also emit the tail as annotations: on a repo where the raw
+                 # run logs need write access to read, annotations are the only
+                 # part of a failure that is publicly visible.
+                 docker compose logs --no-color --tail=25 wp-cron \
+                   | sed 's/^/::warning::wp-cron: /'
+                 docker compose exec -T -u www-data wordpress \
+                   sh -c 'ls -la wp-content | head -20; echo "--- direct install attempt ---"; \
+                          wp plugin install redis-cache --activate 2>&1 | tail -20' \
+                   | sed 's/^/::warning::probe: /'
+                 exit 1
+               }
           docker compose exec -T -u www-data wordpress wp redis status
           docker compose exec -T -u www-data wordpress wp redis status | grep -qi 'connected'
 
