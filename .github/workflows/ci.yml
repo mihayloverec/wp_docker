@@ -91,6 +91,28 @@ jobs:
       - name: verify.sh behaves (positive + negative cases)
         run: sh ci/test-verify.sh
 
+      - name: wordpress and wp-cron share one WordPress config
+        run: |
+          # wp-config.php applies WORDPRESS_CONFIG_EXTRA by eval'ing it at
+          # runtime, so any service running wp-cli needs the identical value.
+          # When only the web container had it, the sidecar ran WordPress with
+          # no WP_REDIS_*, no WP_HOME override and no hardening constants.
+          docker compose --env-file .env.example config --format json > /tmp/cfg.json
+          python3 - <<'PY'
+          import json, sys
+          svc = json.load(open('/tmp/cfg.json'))['services']
+          a = svc['wordpress']['environment'].get('WORDPRESS_CONFIG_EXTRA')
+          b = svc['wp-cron']['environment'].get('WORDPRESS_CONFIG_EXTRA')
+          if not a:
+              sys.exit('wordpress is missing WORDPRESS_CONFIG_EXTRA')
+          if not b:
+              sys.exit('wp-cron is missing WORDPRESS_CONFIG_EXTRA — it would run '
+                       'WordPress without WP_REDIS_*, WP_HOME or any hardening')
+          if a != b:
+              sys.exit('WORDPRESS_CONFIG_EXTRA differs between wordpress and wp-cron')
+          print('ok — both services share an identical WordPress config')
+          PY
+
       - name: every php.ini profile sets sendmail_path
         run: |
           # A profile without it falls back to /usr/sbin/sendmail, which does
@@ -203,19 +225,15 @@ jobs:
                  echo "::error::Redis object-cache drop-in never appeared"
                  echo "--- container state ---"; docker compose ps
                  echo "--- wp-cron log ---";     docker compose logs --no-color wp-cron
-                 # Also emit the tail as annotations: on a repo where the raw
-                 # run logs need write access to read, annotations are the only
-                 # part of a failure that is publicly visible.
-                 docker compose logs --no-color --tail=25 wp-cron \
-                   | sed 's/^/::warning::wp-cron: /'
-                 docker compose exec -T -u www-data wordpress \
-                   sh -c 'ls -la wp-content | head -20; echo "--- direct install attempt ---"; \
-                          wp plugin install redis-cache --activate 2>&1 | tail -20' \
-                   | sed 's/^/::warning::probe: /'
                  exit 1
                }
           docker compose exec -T -u www-data wordpress wp redis status
           docker compose exec -T -u www-data wordpress wp redis status | grep -qi 'connected'
+          # ...and from the SIDECAR, which is the container that regressed:
+          # without WORDPRESS_CONFIG_EXTRA it has no WP_REDIS_HOST and wp-cli
+          # silently falls back to 127.0.0.1:6379.
+          docker compose exec -T -u www-data wp-cron wp redis status
+          docker compose exec -T -u www-data wp-cron wp redis status | grep -qi 'connected'
 
       - name: wp-cron loop is alive (stamps its success file)
         run: |
