@@ -1,24 +1,32 @@
 name: CI
 
 # Validate the infrastructure template on every push / PR so regressions
-# (broken compose, shell bugs, undocumented env vars, image CVEs) are caught
-# before they reach a deploy.
+# (broken compose, shell bugs, undocumented env vars, image CVEs, a stack
+# that no longer boots) are caught before they reach a deploy.
+#
+# Actions are pinned to commit SHAs, not tags or branches. A tag can be
+# moved and a branch changes constantly, so `@master` means "run whatever
+# code that repo has today" with full access to this workflow's context.
+# The version in the trailing comment is what Dependabot bumps.
 on:
   push:
     branches: [ main ]
   pull_request:
+
+permissions:
+  contents: read
 
 jobs:
   lint:
     name: Lint (yaml / shell / dockerfiles)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: yamllint (compose files)
-        uses: ibiqlik/action-yamllint@v3
+        uses: ibiqlik/action-yamllint@2576378a8e339169678f9939646ee3ee325e845c # v3.1.1
         with:
-          file_or_dir: docker-compose.yml proxy-caddy/docker-compose.yml
+          file_or_dir: docker-compose.yml docker-compose.secrets.yml proxy-caddy/docker-compose.yml
           config_data: |
             extends: default
             rules:
@@ -33,42 +41,218 @@ jobs:
               brackets:
                 max-spaces-inside: 1
 
-      - name: shellcheck (backup + verify scripts)
-        uses: ludeeus/action-shellcheck@master
+      - name: shellcheck (backup + verify + init scripts)
+        uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38 # 2.0.0
         with:
           scandir: '.'
           severity: warning
 
       - name: hadolint (wordpress image)
-        uses: hadolint/hadolint-action@v3.1.0
+        uses: hadolint/hadolint-action@2332a7b74a6de0dda2e2221d575162eba76ba5e5 # v3.3.0
         with:
           dockerfile: Dockerfile
 
       - name: hadolint (backup image)
-        uses: hadolint/hadolint-action@v3.1.0
+        uses: hadolint/hadolint-action@2332a7b74a6de0dda2e2221d575162eba76ba5e5 # v3.3.0
         with:
           dockerfile: backup/Dockerfile
 
   validate:
-    name: Compose config + env completeness
+    name: Compose config + env completeness + verify.sh tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: docker compose config (main stack, all profiles)
-        run: docker compose --env-file .env.example --profile backup config -q
+        run: |
+          docker compose --env-file .env.example \
+            --profile backup --profile autoheal config -q
+
+      - name: docker compose config (with the secrets overlay)
+        run: |
+          # The overlay declares file-based secrets, so Compose needs the
+          # files to exist before it will validate.
+          mkdir -p secrets
+          echo dummy > secrets/db_password
+          echo dummy > secrets/db_root_password
+          echo 'requirepass dummy' > secrets/redis.conf
+          docker compose -f docker-compose.yml -f docker-compose.secrets.yml \
+            --env-file .env.example --profile backup config -q
+          rm -rf secrets
 
       - name: docker compose config (caddy edge proxy)
-        run: docker compose -f proxy-caddy/docker-compose.yml --env-file proxy-caddy/.env.example config -q
+        run: |
+          docker compose -f proxy-caddy/docker-compose.yml \
+            --env-file proxy-caddy/.env.example config -q
 
       - name: .env.example documents every required compose var
         run: sh ci/check-env-vars.sh
 
+      - name: verify.sh behaves (positive + negative cases)
+        run: sh ci/test-verify.sh
+
+      - name: every php.ini profile sets sendmail_path
+        run: |
+          # A profile without it falls back to /usr/sbin/sendmail, which does
+          # not exist in the image — so switching profiles would silently
+          # break all outgoing mail. The migration profile is an override
+          # layered on top of php.ini, so it is exempt.
+          for f in php/php.ini php/php.ini.*.example; do
+            case "$f" in *migration*) continue ;; esac
+            grep -q '^sendmail_path' "$f" || { echo "MISSING sendmail_path in $f"; exit 1; }
+            echo "ok $f"
+          done
+
+  smoke:
+    name: Stack actually boots and serves WordPress
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Everything in the other jobs checks syntax. This job answers the
+      # only question that really matters: does the stack come up and serve
+      # a working WordPress, with the hardening actually in effect?
+      - name: Create the shared proxy network
+        run: docker network create web-proxy
+
+      - name: Generate .env with init.sh
+        run: |
+          ./init.sh --stack ci --domain ci.test.local --port 8088 --force
+          # Serve over plain HTTP on localhost for the smoke test (init.sh
+          # writes https://<domain>, which has no certificate here).
+          sed -i 's|^WP_HOME=.*|WP_HOME=http://localhost:8088|' .env
+          sed -i 's|^WP_SITEURL=.*|WP_SITEURL=http://localhost:8088|' .env
+
+      - name: verify.sh passes on the generated .env
+        run: ./verify.sh
+
+      - name: Build and start db / redis / wordpress
+        run: docker compose up -d --build --wait db redis wordpress
+
+      - name: Install WordPress
+        run: |
+          docker compose exec -T -u www-data wordpress wp core install \
+            --url=http://localhost:8088 \
+            --title="CI Smoke Test" \
+            --admin_user=ciadmin \
+            --admin_password="$(openssl rand -base64 24)" \
+            --admin_email=ci@ci.test.local \
+            --skip-email
+
+      - name: Site responds over HTTP
+        run: |
+          code="$(curl -sS -o /dev/null -w '%{http_code}' http://localhost:8088/)"
+          echo "GET / -> $code"
+          [ "$code" = "200" ] || { echo "expected 200"; exit 1; }
+
+      - name: Apache is running the hardened profile
+        run: |
+          docker compose exec -T wordpress apachectl -t
+          # LimitRequestBody 0 here would mean the migration profile leaked
+          # into the default configuration.
+          docker compose exec -T wordpress sh -c \
+            'grep -q "LimitRequestBody 629145600" /etc/apache2/conf-enabled/zz-hardening.conf'
+
+      - name: Hardening rules are enforced over HTTP
+        run: |
+          fail=0
+          check() { # check <path> <expected-code> <description>
+            code="$(curl -sS -o /dev/null -w '%{http_code}' "http://localhost:8088/$1")"
+            if [ "$code" = "$2" ]; then
+              echo "ok   $3 (/$1 -> $code)"
+            else
+              echo "FAIL $3 (/$1 -> $code, expected $2)"; fail=1
+            fi
+          }
+          # A PHP file dropped into uploads must not be executable — that is
+          # the difference between a plugin upload bug and remote code
+          # execution.
+          docker compose exec -T -u www-data wordpress sh -c \
+            'mkdir -p wp-content/uploads && echo "<?php echo 42;" > wp-content/uploads/probe.php'
+          check "wp-content/uploads/probe.php" 403 "PHP execution denied in uploads"
+          check "xmlrpc.php"                   403 "xmlrpc.php denied"
+          check "readme.html"                  403 "readme.html denied (version disclosure)"
+          docker compose exec -T -u www-data wordpress sh -c \
+            'echo "secret" > wp-content/debug.log'
+          check "wp-content/debug.log"         403 "debug.log denied"
+          exit $fail
+
+      - name: Security headers are present
+        run: |
+          headers="$(curl -sSI http://localhost:8088/)"
+          echo "$headers"
+          for h in "x-content-type-options" "x-frame-options" "referrer-policy"; do
+            echo "$headers" | grep -iq "^$h:" || { echo "missing header: $h"; exit 1; }
+          done
+
+      - name: Redis object cache gets enabled by the wp-cron sidecar
+        run: |
+          docker compose up -d wp-cron
+          # The sidecar installs the drop-in on its first loop iteration.
+          for i in $(seq 1 30); do
+            if docker compose exec -T -u www-data wordpress \
+                 test -f /var/www/html/wp-content/object-cache.php; then
+              echo "object-cache.php present"; break
+            fi
+            sleep 10
+          done
+          docker compose exec -T -u www-data wordpress \
+            test -f /var/www/html/wp-content/object-cache.php \
+            || { echo "drop-in never appeared"; docker compose logs wp-cron; exit 1; }
+          docker compose exec -T -u www-data wordpress wp redis status
+          docker compose exec -T -u www-data wordpress wp redis status | grep -qi 'connected'
+
+      - name: wp-cron loop is alive (stamps its success file)
+        run: |
+          for i in $(seq 1 18); do
+            if docker compose exec -T wp-cron test -f /tmp/wp-cron-last-success; then
+              echo "cron stamped success"; exit 0
+            fi
+            sleep 10
+          done
+          echo "cron never stamped a success"; docker compose logs wp-cron; exit 1
+
+      - name: Mail shim fails loudly when SMTP is unconfigured
+        run: |
+          # .env has no SMTP_HOST, so the message must be dropped AND logged.
+          # A silent drop is the failure mode this check exists to prevent.
+          out="$(docker compose exec -T wordpress sh -c \
+            'printf "To: x@ci.test.local\nSubject: t\n\nbody\n" | /usr/local/bin/wp-sendmail 2>&1; echo "exit=$?"')"
+          echo "$out"
+          echo "$out" | grep -q "exit=0"  || { echo "shim should not hard-fail"; exit 1; }
+          echo "$out" | grep -q "DROPPED" || { echo "shim dropped mail SILENTLY"; exit 1; }
+
+      - name: Backup image builds and its restore tool is wired up
+        run: |
+          docker compose --profile backup build backup
+          docker compose --profile backup run --rm \
+            --entrypoint /usr/local/bin/restore.sh backup --help
+
+      - name: No fatal errors in any container log
+        run: |
+          logs="$(docker compose logs --no-color 2>&1)"
+          if echo "$logs" | grep -nEi 'PHP Fatal|segmentation fault|\[emerg\]|\[alert\]'; then
+            echo "--- full logs ---"; echo "$logs"; exit 1
+          fi
+          echo "no fatal errors found"
+
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose logs --no-color --tail=200
+
+      - name: Tear down
+        if: always()
+        run: docker compose --profile backup down -v --remove-orphans
+
   build-scan:
     name: Build images + Trivy scan
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Needed to publish scan results to the Security tab.
+      security-events: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Build wordpress image
         run: docker build -t wp-stack:ci .
@@ -76,19 +260,38 @@ jobs:
       - name: Build backup image
         run: docker build -t wp-backup:ci ./backup
 
+      # Results go to the Security tab as SARIF rather than only into this
+      # job's log, so findings are tracked over time instead of scrolling
+      # past once. Still non-blocking: base-image CVEs are usually not
+      # fixable here and must not wedge every PR.
       - name: Trivy scan (wordpress image)
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: wp-stack:ci
           severity: HIGH,CRITICAL
           ignore-unfixed: true
-          # Report only — don't fail the build on unpatched base-image CVEs.
+          format: sarif
+          output: trivy-wordpress.sarif
           exit-code: '0'
 
       - name: Trivy scan (backup image)
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: wp-backup:ci
           severity: HIGH,CRITICAL
           ignore-unfixed: true
+          format: sarif
+          output: trivy-backup.sarif
           exit-code: '0'
+
+      - name: Upload wordpress scan to the Security tab
+        uses: github/codeql-action/upload-sarif@4187e74d05793876e9989daffde9c3e66b4acd07 # v3
+        with:
+          sarif_file: trivy-wordpress.sarif
+          category: trivy-wordpress
+
+      - name: Upload backup scan to the Security tab
+        uses: github/codeql-action/upload-sarif@4187e74d05793876e9989daffde9c3e66b4acd07 # v3
+        with:
+          sarif_file: trivy-backup.sarif
+          category: trivy-backup

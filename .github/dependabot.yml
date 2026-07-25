@@ -31,6 +31,19 @@ updates:
       - "dependencies"
       - "docker"
 
+  # Edge proxy image (proxy-caddy/docker-compose.yml → caddy).
+  # Easy to forget because it is a separate stack, and the worst one to
+  # leave stale: it terminates TLS for every site on the host.
+  - package-ecosystem: "docker"
+    directory: "/proxy-caddy"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "deps"
+    labels:
+      - "dependencies"
+      - "docker"
+
   # GitHub Actions pinned in the CI workflow.
   - package-ecosystem: "github-actions"
     directory: "/"
