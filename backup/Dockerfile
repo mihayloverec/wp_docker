@@ -3,7 +3,7 @@
 #  Based on mariadb:11.4 so mariadb-dump exactly matches the server,
 #  plus rclone for upload to any S3 endpoint (Timeweb, Selectel, AWS...).
 # =====================================================================
-FROM mariadb:11.4
+FROM mariadb:12.3
 
 # curl is needed for the optional Healthchecks.io success/fail pings.
 RUN set -eux; \
