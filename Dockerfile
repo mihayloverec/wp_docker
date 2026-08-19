@@ -5,7 +5,7 @@
 #    - soap:            some WooCommerce payment/shipping gateways
 #    - wp-cli:          real cron runner + maintenance commands
 # =====================================================================
-FROM wordpress:7.0.2-php8.3-apache
+FROM wordpress:7.0.4-php8.3-apache
 
 ARG PHPREDIS_VERSION=6.2.0
 # sha256 of the 6.2.0 source tarball. A version tag alone is NOT an integrity
