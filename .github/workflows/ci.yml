@@ -361,14 +361,14 @@ jobs:
       # still runs and its findings are in the job log.
       - name: Upload wordpress scan to the Security tab
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-        uses: github/codeql-action/upload-sarif@4187e74d05793876e9989daffde9c3e66b4acd07 # v3
+        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v3
         with:
           sarif_file: trivy-wordpress.sarif
           category: trivy-wordpress
 
       - name: Upload backup scan to the Security tab
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-        uses: github/codeql-action/upload-sarif@4187e74d05793876e9989daffde9c3e66b4acd07 # v3
+        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v3
         with:
           sarif_file: trivy-backup.sarif
           category: trivy-backup
